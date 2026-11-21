@@ -4,7 +4,7 @@
 // and the money reminder of a reply that used the allowance up. What a member's browser received is recorded from its first
 // request: for them none of it exists, not in the page, not in a frame, not in an answer of the service.
 import { test, expect } from "./support/fixtures.mjs";
-import { befriend, sendApi, uniq } from "./support/accounts.mjs";
+import { befriend, grantPoints, sendApi, uniq } from "./support/accounts.mjs";
 import { agentMessagesWith, chatPane, listRow, messageList, openChat, sendText } from "./support/app.mjs";
 import { canControlService } from "./support/control.mjs";
 import { modelStub } from "./support/model-stub.mjs";
@@ -264,4 +264,83 @@ test("a member's call whose tool reply uses up its owner's free allowance still 
   expect(traffic.frames.filter((f) => /whisper/i.test(f))).toEqual([]);
   for (const body of await traffic.api()) expect(/whisper|额度用完了/i.test(body), body.slice(0, 120)).toBe(false);
   expect(received.includes("额度用完了")).toBe(false);
+});
+
+// --- 5. 不用 --------------------------------------------------------------------------------------------------------------------
+
+test("不用 on a found-elsewhere whisper resolves it for the owner: 已忽略, no dot, nothing said in the group, no model call; a member's page and frames are as before", async ({ people }) => {
+  const world = await elsewhereWorld(people);
+  const { ann, bo, annChat, boChat, g, word, traffic, canaries } = world;
+  const tag = uniq(4);
+  const answer = `这个群里没有查到。${tag}`;
+  await modelStub.callTools(searchFor(word));
+  await modelStub.reply(answer);
+  await ask(world, tag);
+  await expect(agentMessagesWith(annChat, answer)).toHaveCount(1);
+  const whisper = whispers(annChat);
+  await expect(whisper).toHaveCount(1);
+  await expect(whisperDot(ann.page, g.title)).toBeVisible();
+  const before = await messageList(annChat).locator("li.msg").count();
+  const framesBefore = traffic.frames.length;
+
+  await whisper.getByRole("button", { name: "不用" }).click();
+  await expect(whisper).toContainText("已忽略");
+  await expect(whisper.getByRole("button")).toHaveCount(0);
+  await expect(whisperDot(ann.page, g.title)).toHaveCount(0);
+  // Nothing was posted, nothing was asked of the model (two calls: the search round and its answer).
+  await expect(messageList(annChat).locator("li.msg")).toHaveCount(before);
+  expect((await modelStub.calls()).length).toBe(2);
+
+  await bothCaughtUp(world);
+  await expect(whispers(boChat)).toHaveCount(0);
+  await expect(messageList(boChat).locator("li.msg")).toHaveCount(before + 1);
+  // Only the marker message came to Bo since: no frame of a whisper, no canary.
+  const since = traffic.frames.slice(framesBefore);
+  expect(since.filter((f) => /whisper/i.test(f))).toEqual([]);
+  const received = [...(await traffic.api()), ...traffic.frames].join("\n");
+  for (const secret of canaries) expect(received.includes(secret), `${secret} reached Bo's browser`).toBe(false);
+  expect(bo.page.isClosed()).toBe(false);
+});
+
+// --- 6. the balance --------------------------------------------------------------------------------------------------------------
+
+test("an owner paying from a balance that a tool reply takes to zero is told 余额用完了。 once, in the Agent's own conversation; the member whose call it was sees nothing", async ({ people }) => {
+  const ann = await people.member("Ann", { open: false });
+  const bo = await people.member("Bo", { open: false });
+  const cy = await people.member("Cy", { open: false });
+  await befriend(ann, bo);
+  await befriend(ann, cy);
+  const agent = await agentApi(ann, { name: `查查${uniq(4)}`, model: { source: "site", id: "e2e-paid" } });
+  const { id: groupId, title } = await groupApi(ann, [bo, cy]);
+  await addApi(ann, groupId, agent.id);
+  const word = hanTag(4);
+  await sendApi(ann, groupId, `周五聚餐吃${word}火锅，晚上七点`);
+  // The operator grants half a point: the paid model's two calls of 0.3002 points take it below zero.
+  await grantPoints(ann, "0.5");
+  const traffic = recordTraffic(bo.context);
+  for (const person of [ann, bo]) person.page = await people.openApp(person);
+  const groupChat = await openChat(ann.page, title);
+  const boChat = await openChat(bo.page, title);
+  const tag = uniq(4);
+  const answer = `聚餐定在周五晚上七点，吃火锅。${tag}`;
+  const used = { usage: { input: 20, output: 25 } };
+  await modelStub.callTools(searchFor(word), used);
+  await modelStub.reply(answer, used);
+  await sendText(bo.page, title, `@${agent.handle} 聚餐是什么时候？${tag}`);
+  for (const chat of [groupChat, boChat]) await expect(agentMessagesWith(chat, answer)).toHaveCount(1);
+
+  const own = await openChat(ann.page, agent.name);
+  const reminder = whispers(own);
+  await expect(reminder).toHaveCount(1);
+  await expect(reminder).toContainText("余额用完了。");
+  await expect(reminder.getByRole("button")).toHaveCount(0);
+  await expect(whispers(chatPane(ann.page, title))).toHaveCount(0);
+
+  await openChat(ann.page, title);
+  await sendApi(ann, groupId, `都收到了 ${uniq(6)}`);
+  await expect(boChat).toContainText("都收到了");
+  await expect(whispers(boChat)).toHaveCount(0);
+  expect(traffic.frames.filter((f) => /whisper/i.test(f))).toEqual([]);
+  for (const body of await traffic.api()) expect(/whisper|余额用完了/i.test(body), body.slice(0, 120)).toBe(false);
+  expect([...traffic.frames].join("\n").includes("余额用完了")).toBe(false);
 });
