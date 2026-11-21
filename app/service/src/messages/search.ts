@@ -3,6 +3,7 @@ import type { Db, Queryable, Tx } from "../db.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
 import { toWireFor, type ReadConfig } from "./read.ts";
+import { handleOf } from "../principals/store.ts";
 
 /** Searches one principal may have running at once, both routes together; one more is 429 `rate_limited`. */
 export const MAX_CONCURRENT_SEARCHES = 2;
@@ -96,7 +97,7 @@ export interface SearchRowsOptions {
   conversationIds: readonly string[];
   /** The words, matched as the routes match them (`matchOn`: a substring of the text or the file's name, any case). */
   term: string;
-  /** Only a sender whose account name (any case) or display name is exactly this; null: anyone. */
+  /** Only the sender this names (`senderNamed`); null: anyone. */
   from: string | null;
   /** Only messages sent before the start of this day (`YYYY-MM-DD`), or after its end, in `timeZone`; null: no bound. */
   before: string | null;
@@ -128,12 +129,34 @@ export interface SearchRow {
   /** A file message's attachment. */
   attachment: { id: string; name: string } | null;
   sender_name: string;
+  /** As everyone is shown it (`handleOf`: an Agent's is `owner.name`). */
   sender_handle: string;
   sender_kind: "human" | "agent";
   /** The conversation's title (a group's; null when it has none). */
   title: string | null;
   conversation_type: string;
 }
+
+/** SQL, inside `senderNamed`: whether principal `p` (an alias) is a current member of conversation `c` that is no deleted Agent. */
+const memberNow = (p: string, c: string): string =>
+  `exists (select 1 from memberships fm where fm.conversation_id = ${c} and fm.principal_id = ${p}.id and fm.left_seq is null)
+   and not exists (select 1 from agents fd where fd.principal_id = ${p}.id and fd.deleted_at is not null)`;
+
+/**
+ * SQL: whether the sender `sp` (a `principals` alias) of message `m` (a `messages` alias) is whom `from` names (a parameter
+ * position: the model's `from`, cleaned) — the one rule for an Agent's search and for the hook that looks elsewhere with
+ * its filters (final review m-1): a handle as everyone is shown it, any case (`handleOf`: a person's own, an Agent's
+ * `owner.name`); a display name, exactly; or an Agent's name part alone where a typed `@name` would call it in the
+ * message's conversation (agents/mentions.ts `namedIn`): the Agent is a current member there, and no other current member
+ * is named so first — no person by that handle or display name (trimmed, any case), no other Agent by that name part.
+ */
+export const senderNamed = (sp: string, m: string, from: string): string =>
+  `(lower(${handleOf(sp)}) = lower(${from}) or ${sp}.display_name = ${from}
+    or (${sp}.kind = 'agent' and lower(${sp}.handle::text) = lower(${from}) and ${memberNow(sp, `${m}.conversation_id`)}
+        and not exists (select 1 from memberships fo join principals fp on fp.id = fo.principal_id
+                         where fo.conversation_id = ${m}.conversation_id and fo.left_seq is null and fp.id <> ${sp}.id
+                           and case when fp.kind = 'human' then lower(fp.handle::text) = lower(${from}) or lower(btrim(fp.display_name)) = lower(${from})
+                                    else lower(fp.handle::text) = lower(${from}) and not exists (select 1 from agents fx where fx.principal_id = fp.id and fx.deleted_at is not null) end)))`;
 
 /**
  * The messages that match among `conversationIds` (and only those: the list is a parameter of the one statement) as
@@ -145,7 +168,7 @@ export async function searchRows(q: Queryable, readerId: string, o: SearchRowsOp
   const { rows } = await q.query<SearchRow>(
     `select m.conversation_id, m.seq::text as seq, m.created_at, m.sender_id, m.body ->> 'text' as text,
             case when m.kind = 'file' then m.body -> 'attachment' end as attachment,
-            sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
+            sp.display_name as sender_name, ${handleOf("sp")} as sender_handle, sp.kind as sender_kind,
             c.title, c.type as conversation_type
        from messages m ${VISIBLE_JOIN}
        join principals sp on sp.id = m.sender_id
@@ -153,7 +176,7 @@ export async function searchRows(q: Queryable, readerId: string, o: SearchRowsOp
       where m.conversation_id = any($2::uuid[])
         and ${matchOn(3)}
         and (m.body -> 'fixed') is distinct from 'true'::jsonb
-        and ($4::text is null or lower(sp.handle::text) = lower($4::text) or sp.display_name = $4::text)
+        and ($4::text is null or ${senderNamed("sp", "m", "$4::text")})
         and ($5::date is null or m.created_at < ($5::date)::timestamp at time zone $7::text)
         and ($6::date is null or m.created_at >= ($6::date + 1)::timestamp at time zone $7::text)
         and ($8::uuid is null or m.conversation_id <> $8::uuid or (m.seq > $9::bigint and m.seq <= $10::bigint)

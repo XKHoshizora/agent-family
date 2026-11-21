@@ -3323,7 +3323,10 @@ the run that gave it, so an earlier reply's `〔m1〕` copied into this one coul
   A new topic changes nothing here: search is history, not context. Matched as the search routes match (Search: a
   substring of the text or the file's name, any case); `query` is cleaned as a stored text is (`cleanText`), then refused
   under two characters (`要查的词至少要两个字。`) or over a weight of 60 (`要查的词太长了，换几个关键的字再查。`) without touching the
-  database; `from` is a sender's account name (any case, with or without `@`) or display name, and what follows `｜` is
+  database; `from` is a sender's account name as everyone is shown it (any case, with or without `@`: a person's handle,
+  an Agent's full handle `owner.name`), their display name, or an Agent's name part alone where a typed `@name` would
+  call it in that conversation (Mentions: no person there by that handle or name, no other Agent there by that name part;
+  `messages/search.ts` `senderNamed`, which the elsewhere lookup's same filter goes through too), and what follows `｜` is
   ignored (a result's `who` can be passed back); `before` and `after` are days (`YYYY-MM-DD`, else
   `日期要写成 YYYY-MM-DD，比如 2026-11-20。`) in the site's time zone, that day itself not included. It takes one of the
   Agent's search slots, as a person's search does (2 at once, 4 in the whole service; none free:

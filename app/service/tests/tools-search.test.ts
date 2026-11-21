@@ -123,6 +123,37 @@ describe("what a search gives", () => {
     expect(nobody.results).toEqual([]);
   });
 
+  it("`from` names an Agent as everyone is shown it — its full handle, owner.name — or by its name part alone only where a typed @name would call it there (final review m-1)", async () => {
+    const { owner, agent } = await owned("owen");
+    const [mia, ned] = [await signUp(app, "mia"), await signUp(app, "ned")];
+    const g = await group(app, owner, "饭搭子", [mia, ned]);
+    await addAgent(owner, g, agent.id);
+    // owen's second Agent (one second_bot there), and two jarvis: mia's and ned's.
+    const second = await mustCreateAgent(app, owner, { handle: "second_bot", name: "二号", model: FAST, persona: "简短。" });
+    const miaJ = await mustCreateAgent(app, mia, { handle: "jarvis", name: "贾维斯", model: FAST, persona: "简短。" });
+    const nedJ = await mustCreateAgent(app, ned, { handle: "jarvis", name: "贾维斯", model: FAST, persona: "简短。" });
+    await addAgent(owner, g, second.id);
+    await addAgent(mia, g, miaJ.id);
+    await addAgent(ned, g, nedJ.id);
+    await postAs(g, second.id, "二号说：火锅要辣");
+    await postAs(g, miaJ.id, "mia 的贾维斯：火锅要麻");
+    await postAs(g, nedJ.id, "ned 的贾维斯：火锅要清汤");
+    const found = async (from: string) => (await searchOnce(owner, g, `@owen_bot 谁说的 ${from}`, { query: "火锅", from })).results.map((r: any) => r.text);
+    expect(await found("owen.second_bot")).toEqual(["二号说：火锅要辣"]);
+    expect(await found("@MIA.jarvis")).toEqual(["mia 的贾维斯：火锅要麻"]);
+    // A bare name part: where @second_bot alone would call it, it names it; where two Agents share one, it names nobody.
+    expect(await found("second_bot")).toEqual(["二号说：火锅要辣"]);
+    expect(await found("jarvis")).toEqual([]);
+    // And never past a person: in a group where a person's handle is jarvis, a bare jarvis is that person.
+    const jarvis = await signUp(app, "jarvis");
+    const h = await group(app, owner, "乙群", [jarvis, mia]);
+    await addAgent(owner, h, agent.id);
+    await addAgent(mia, h, miaJ.id);
+    await postAs(h, jarvis.id, "真人 jarvis：火锅随便");
+    await postAs(h, miaJ.id, "mia 的贾维斯在乙群：火锅要麻");
+    expect((await searchOnce(owner, h, "@owen_bot 谁说的", { query: "火锅", from: "jarvis" })).results.map((r: any) => r.text)).toEqual(["真人 jarvis：火锅随便"]);
+  });
+
   it("dates are the site's: `before` and `after` a day (that day not included) and `when`, in its time zone; a date not written as YYYY-MM-DD is refused", async () => {
     const { owner, own } = await owned();
     expect(app.deps.config.siteTimezone).toBe("Asia/Shanghai");
