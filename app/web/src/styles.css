@@ -522,7 +522,8 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 .md table { border-collapse: collapse; font-size: 14px; line-height: 1.45; }
 .md :is(th, td) { min-width: 5em; padding: 5px 10px; border: 1px solid var(--line-strong); text-align: left; vertical-align: top; }
 .md th { background: rgba(221, 214, 255, 0.45); font-weight: 600; white-space: nowrap; }
-.md sup { font-size: 0.75em; line-height: 0; }
+/* A superscript of the Markdown tree; a reply's citation (`.cite`) is a box of its own (above), never this. */
+.md sup:not(.cite) { font-size: 0.75em; line-height: 0; }
 .md .footnotes { margin-top: 10px; padding-top: 6px; border-top: 1px solid var(--line); font-size: 13px; color: var(--ink-2); }
 .md .katex-display { padding: 2px 0; overflow-x: auto; overflow-y: hidden; }
 /* (A bubble is as wide as its content: an equation's number follows it instead of being placed over its right end.) */

@@ -53,6 +53,100 @@ const storedLi = (seq) => timeline().querySelector(`li[data-msg="m${seq}"]`);
 const lookupLine = (seq) => storedLi(seq).querySelector(".msg-lookups");
 const runPush = (transport, fields = {}) => push(transport, { type: "run", conversationId: A1, run: runOf(R1, "running"), ...fields });
 
+/** A selector's specificity as [ids, classes, elements] (`:is`/`:not`/`:has` count their most specific argument, `:where` none). */
+function specificity(selector) {
+  let s = selector;
+  const total = [0, 0, 0];
+  const more = (a, b) => {
+    const i = a.findIndex((n, k) => n !== b[k]);
+    return i >= 0 && a[i] > b[i];
+  };
+  // Functional pseudo-classes first, innermost out: each counts as the most specific of its arguments (`:where` as nothing).
+  for (let m = /:(is|not|has|where)\(([^()]*)\)/.exec(s); m; m = /:(is|not|has|where)\(([^()]*)\)/.exec(s)) {
+    if (m[1] !== "where") {
+      const best = m[2].split(",").map((a) => specificity(a.trim())).reduce((x, y) => (more(y, x) ? y : x));
+      best.forEach((n, i) => (total[i] += n));
+    }
+    s = `${s.slice(0, m.index)} ${s.slice(m.index + m[0].length)}`;
+  }
+  s = s.replace(/::[\w-]+/g, () => ((total[2] += 1), " "));
+  s = s.replace(/:[\w-]+/g, () => ((total[1] += 1), " "));
+  s = s.replace(/\[[^\]]*\]/g, () => ((total[1] += 1), " "));
+  s = s.replace(/#[\w-]+/g, () => ((total[0] += 1), " "));
+  s = s.replace(/\.[\w-]+/g, () => ((total[1] += 1), " "));
+  total[2] += [...s.matchAll(/(?:^|[\s>+~])[a-zA-Z][\w-]*/g)].length;
+  return total;
+}
+
+/**
+ * The cascade of a stylesheet's text over an element, a property at a time: the value of the declaration that wins among
+ * the rules (also inside `@media`) whose selectors match the element — the most specific matching selector, then the later
+ * rule; `font: inherit` sets `font-size` and `line-height` too. Undefined when no rule sets it.
+ */
+function cascadeOf(cssText) {
+  const css = cssText.replace(/\/\*[\s\S]*?\*\//g, "");
+  const rules = [];
+  const read = (text) => {
+    let at = 0;
+    for (let open = text.indexOf("{", at); open >= 0; open = text.indexOf("{", at)) {
+      const head = text.slice(at, open).trim();
+      if (head.startsWith("@")) {
+        let depth = 1;
+        let i = open + 1;
+        for (; i < text.length && depth > 0; i += 1) depth += text[i] === "{" ? 1 : text[i] === "}" ? -1 : 0;
+        read(text.slice(open + 1, i - 1));
+        at = i;
+        continue;
+      }
+      const close = text.indexOf("}", open);
+      const decls = {};
+      for (const d of text.slice(open + 1, close).split(";")) {
+        const k = d.indexOf(":");
+        if (k > 0) decls[d.slice(0, k).trim()] = d.slice(k + 1).trim();
+      }
+      const selectors = [];
+      let depth = 0;
+      let from = 0;
+      for (let i = 0; i <= head.length; i += 1) {
+        if (head[i] === "(") depth += 1;
+        else if (head[i] === ")") depth -= 1;
+        else if ((head[i] === "," && depth === 0) || i === head.length) {
+          selectors.push(head.slice(from, i).trim());
+          from = i + 1;
+        }
+      }
+      rules.push({ selectors, decls });
+      at = close + 1;
+    }
+  };
+  read(css);
+  const beats = (a, b) => {
+    const i = a.findIndex((n, k) => n !== b[k]);
+    return i < 0 || a[i] > b[i];
+  };
+  return (el, property) => {
+    let won = null;
+    for (const rule of rules) {
+      let value = rule.decls[property];
+      if (value === undefined && (property === "font-size" || property === "line-height") && rule.decls.font === "inherit") value = "inherit";
+      if (value === undefined) continue;
+      for (const selector of rule.selectors) {
+        let matches = false;
+        try {
+          matches = el.matches(selector);
+        } catch {
+          matches = false;
+        }
+        if (!matches) continue;
+        const spec = specificity(selector);
+        // A later rule wins a tie.
+        if (!won || beats(spec, won.spec)) won = { spec, value: value.replace(/\s*!important$/, "") };
+      }
+    }
+    return won?.value;
+  };
+}
+
 describe("while a reply's tool runs", () => {
   it("in my Agent's own conversation the bubble says what kind of thing it looks at — 正在查聊天记录… / 正在看文件… / 正在看时间… —, under what it wrote so far, and 正在回复… again once the model writes", async () => {
     const { transport } = await openChats();
@@ -277,26 +371,33 @@ describe("what a reply looked up", () => {
     expect(storedLi(7).classList.contains("flash")).toBe(true);
   });
 
-  it("a citation's link is a real box as tall as the text line, its number set high in it as a superscript (final review, item 13)", async () => {
+  it("a citation's link is a real box as tall as the text line, its number set high in it as a superscript — in a rendered reply too, where the Markdown tree's own rule for a sup does not win (final review, item 13; round 2)", async () => {
     const cites = { m1: { conversationId: A1, seq: 2 } };
     await openChats({ messages: [...BASE, wire(A1, 3, AG1, "你问过〔m1〕。", { lookups: { search: 1 }, cites })] });
-    const [link] = storedLi(3).querySelectorAll("sup.cite > button");
+    // The reply as the Markdown tree renders it: the citation's sup inside `.md`.
+    const sup = storedLi(3).querySelector(".md sup.cite");
+    expect(sup).not.toBeNull();
+    const link = sup.querySelector(":scope > button");
     // The button is the box; the number is a span inside it.
     expect(link.querySelector(":scope > span")?.textContent).toBe("1");
-    // jsdom has no layout (an e2e spec could measure): here, the rules the box relies on.
-    const css = readFileSync("src/styles.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
-    const rule = (selector) => new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`).exec(css)?.[1] ?? "";
-    // The sup moves no line and takes the line's own height (no line-height of 0, no raise of its own)…
-    expect(rule(".cite")).not.toMatch(/line-height:\s*0/);
-    expect(rule(".cite")).toMatch(/vertical-align:\s*baseline/);
-    expect(rule(".cite")).toMatch(/line-height:\s*inherit/);
-    // …the button is a box of the text's own font and line height…
-    expect(rule(".cite > button")).toMatch(/display:\s*inline-block/);
-    expect(rule(".cite > button")).toMatch(/font:\s*inherit/);
-    expect(rule(".cite > button")).not.toMatch(/font-size/);
+    // jsdom has no layout (the real proof is the e2e spec agents-tools.spec.mjs, "the citation link is a real box"): here,
+    // the declaration that wins for each property the box relies on — every rule of styles.css whose selector matches the
+    // element, by specificity and then by order, as a browser's cascade picks it.
+    const winner = cascadeOf(readFileSync("src/styles.css", "utf8"));
+    // The sup moves no line and takes the line's own height and font (not the Markdown tree's 0.75em and line-height 0)…
+    expect([winner(sup, "line-height"), winner(sup, "font-size"), winner(sup, "vertical-align")]).toEqual(["inherit", "inherit", "baseline"]);
+    // …the button is a box of the text's own font and line height (nothing more specific sets either)…
+    expect([winner(link, "display"), winner(link, "font-size"), winner(link, "line-height")]).toEqual(["inline-block", "inherit", "inherit"]);
     // …and the number is small, at the top of it.
-    expect(rule(".cite > button > span")).toMatch(/font-size:\s*11px/);
-    expect(rule(".cite > button > span")).toMatch(/vertical-align:\s*top/);
+    const number = link.querySelector(":scope > span");
+    expect([winner(number, "font-size"), winner(number, "vertical-align")]).toEqual(["11px", "top"]);
+    // An ordinary superscript of the Markdown tree keeps its own rule.
+    const plain = document.createElement("div");
+    plain.className = "md";
+    plain.innerHTML = "<p>x<sup>2</sup></p>";
+    document.body.append(plain);
+    expect([winner(plain.querySelector("sup"), "line-height"), winner(plain.querySelector("sup"), "font-size")]).toEqual(["0", "0.75em"]);
+    plain.remove();
   });
 
   it("a cited reply shown as plain text (too long to render, with the note) keeps its citations as links", async () => {
