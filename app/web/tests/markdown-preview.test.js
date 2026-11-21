@@ -36,6 +36,8 @@ describe("previewOfMarkdown", () => {
     ["arithmetic keeps its stars inside words", "2*3 是 6", "2*3 是 6"],
     ["a hash that is not a heading", "C# 和 #标签", "C# 和 #标签"],
     ["a number that is not a list", "2024.5 是版本", "2024.5 是版本"],
+    ["a reply's citations are no part of its preview", "饺子馆在河边〔m1〕，菜单见〔f2〕。〔m12〕", "饺子馆在河边，菜单见。"],
+    ["a citation in code stays code", "```\nx〔m1〕\n```", "x〔m1〕"],
   ])("%s", (_label, text, preview) => {
     expect(previewOfMarkdown(text)).toBe(preview);
   });

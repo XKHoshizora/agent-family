@@ -25,6 +25,8 @@ const ANGLE = /<(https?:\/\/[^<>\s]*)>/g;
 const EMPHASIS = /\*+|_+|~{2,}/g;
 const CODE_AND_MATHS = /`+|\${2}/g;
 const WORD = /[A-Za-z0-9]/;
+/** A reply's citation (`〔m3〕`, `〔f2〕`, as the service keeps it in the text): a link in the message, nothing in a preview. */
+const CITATION = /〔[mf][1-9][0-9]{0,5}〕/g;
 const BLANK = /\s/;
 
 /** One line outside code, without its markers. */
@@ -34,7 +36,7 @@ function withoutMarkers(line) {
   for (let i = 0; i < 4; i += 1) text = text.replace(QUOTE, "").replace(LIST, "");
   if (RULE.test(text) || DEFINITION.test(text)) return "";
   text = text.replace(HEADING, "").replace(HEADING_END, "");
-  text = text.replace(LINK, "$1").replace(REFERENCE, "$1").replace(ANGLE, "$1").replace(CODE_AND_MATHS, "");
+  text = text.replace(LINK, "$1").replace(REFERENCE, "$1").replace(ANGLE, "$1").replace(CODE_AND_MATHS, "").replace(CITATION, "");
   // Emphasis characters go, except where they are not emphasis: inside a word (`get_user_name`, `2*3`) or alone
   // between spaces (`a * b`).
   text = text.replace(EMPHASIS, (run, at) => {
@@ -46,8 +48,8 @@ function withoutMarkers(line) {
 }
 
 /**
- * The preview of an Agent's text: headings', quotes' and lists' markers, emphasis and code markers and link syntax
- * taken out; a code fence is its first line of code (or nothing); everything on one line, at most PREVIEW_CHARS
+ * The preview of an Agent's text: headings', quotes' and lists' markers, emphasis and code markers, link syntax and
+ * its citations (`〔m3〕`, `〔f2〕`: the message shows them as links) taken out; a code fence is its first line of code (or nothing); everything on one line, at most PREVIEW_CHARS
  * characters. A text that is nothing but markers is shown as it was written (on one line).
  */
 export function previewOfMarkdown(text) {
