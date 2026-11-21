@@ -165,6 +165,47 @@ test("告诉他们 while the Agent is still replying says 它正在回复，说�
   expect(traffic.frames.filter((f) => /whisper/i.test(f))).toEqual([]);
 });
 
+test("告诉他们 whose call fails: the whisper comes back for its owner, with the hits and both buttons; a member's page and frames show nothing of it; pressing 告诉他们 again posts the answer once", async ({ people }) => {
+  const world = await elsewhereWorld(people);
+  const { ann, annChat, boChat, word, hitText, traffic, canaries } = world;
+  const tag = uniq(4);
+  const first = `这个群里没有查到。${tag}`;
+  const told = `周六有个聚会，定在老地方，每人带个菜。${tag}`;
+  await modelStub.callTools(searchFor(word));
+  await modelStub.reply(first);
+  await ask(world, tag);
+  for (const chat of [annChat, boChat]) await expect(agentMessagesWith(chat, first)).toHaveCount(1);
+  const whisper = whispers(annChat);
+  await expect(whisper).toHaveCount(1);
+  await expect(whisper).toContainText(hitText.slice(0, 12));
+
+  // The telling's model call fails: nothing is posted, and the whisper is open again, hits and buttons as before.
+  await modelStub.script({ status: 500, message: "upstream down" }, { status: 500, message: "upstream down" });
+  await whisper.getByRole("button", { name: "告诉他们" }).click();
+  await expect.poll(async () => (await modelStub.calls()).length, { message: "the telling's call was made" }).toBeGreaterThanOrEqual(3);
+  await expect(whisper).toHaveCount(1);
+  await expect(whisper).not.toContainText("已告诉他们");
+  await expect(whisper.getByRole("button", { name: "告诉他们" })).toBeEnabled({ timeout: 30_000 });
+  await expect(whisper.getByRole("button", { name: "不用" })).toBeEnabled();
+  await expect(whisper).toContainText(hitText.slice(0, 12));
+  await expect(whisperDot(ann.page, world.g.title)).toHaveCount(1);
+  await expect(agentMessagesWith(annChat, told)).toHaveCount(0);
+
+  // Pressing it again tells, once.
+  await modelStub.reset();
+  await modelStub.reply(told);
+  await whisper.getByRole("button", { name: "告诉他们" }).click();
+  for (const chat of [annChat, boChat]) await expect(agentMessagesWith(chat, told)).toHaveCount(1);
+  await expect(whisper).toContainText("已告诉他们");
+  await expect(whisper.getByRole("button")).toHaveCount(0);
+
+  // Bo saw only the Agent's answers: no whisper, no hit's text, title or name, at any point.
+  await bothCaughtUp(world);
+  const received = [...(await traffic.api()), ...traffic.frames].join("\n");
+  for (const secret of canaries) expect(received.includes(secret), `${secret} reached Bo's browser`).toBe(false);
+  expect(traffic.frames.filter((f) => /whisper/i.test(f))).toEqual([]);
+});
+
 // --- 3. a provider that cannot use tools -----------------------------------------------------------------------------------
 
 test("a provider that rejects tools: the reply arrives all the same, the owner is told once by a whisper without buttons, and the next reply goes without tools", async ({ people }) => {
