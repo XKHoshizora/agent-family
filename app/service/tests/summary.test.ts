@@ -970,6 +970,51 @@ describe("final review", () => {
     expect((await summaryOf(w.g, w.agent.id))!.text).toBe(stored);
   });
 
+  it("m-10: an acknowledgement is no line of a summary: not in its input, not counted toward its minimum", async () => {
+    const w = await own("fe");
+    // 19 long lines and 6 acknowledgements of the Agent's among them: fewer than summaryMinMessages (20) lines.
+    const seqs: number[] = [];
+    for (let i = 0; i < 19; i++) {
+      seqs.push(...(await seed(w.conv, [i % 2 === 0 ? w.owner.id : w.agent.id], [long(i)])));
+      if (i % 3 === 1) {
+        const ack = await db.tx((t) => insertMessage(t, w.conv, w.agent.id, "text", { text: `ACK-CANARY-${i} 我查一下`, ack: true } as never, `ack:${crypto.randomUUID()}`));
+        seqs.push(ack.seq);
+      }
+    }
+    expect(seqs).toHaveLength(25);
+    const job = (upTo: number) => ({ kind: "summary" as const, agentId: w.agent.id, conversationId: w.conv, upTo });
+    const none = jobContext();
+    await runSummary(jobDeps(), job(seqs.at(-1)!), none.ctx);
+    expect(summaryCalls()).toHaveLength(0);
+    expect(none.attempts).toEqual([]);
+    // One more line: twenty. The call is made, and shown none of the acknowledgements.
+    const [last] = await seed(w.conv, [w.agent.id], [long(19)]);
+    gateway.reply(ANSWER);
+    await runSummary(jobDeps(), job(last!), jobContext().ctx);
+    expect(summaryCalls()).toHaveLength(1);
+    const input = inputOf(summaryCalls()[0]!);
+    expect(input).toHaveLength(20);
+    expect(JSON.stringify(input)).not.toContain("ACK-CANARY");
+  });
+
+  it("m-10: no citation reaches a summary — not from a message's text, its sender's name or the old summary — and none is stored", async () => {
+    const w = await groupWorld("ff", 0);
+    await db.query("update principals set display_name = 'ff〔f1〕m' where id = $1", [w.m.id]);
+    const joined = await joinedSeq(w.g, w.agent.id);
+    const seqs = await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 120 }, (_, i) => (i % 10 === 1 ? `见〔m${i}〕和〔 F2 〕${short(i)}` : short(i))));
+    await storeSummary(w.g, w.agent.id, joined + 1, seqs[9]!, ["人物与称呼", "ffm（@ffm）在〔m1〕群里", "说过的事", "定下的事〔f3〕", "还没解决的"].join("\n"));
+    await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
+    const answer = ["人物与称呼", "ffm（@ffm）在群里〔m4〕", "说过的事", "主人（ffv（@ffv））说了〔f1〕很多", "定下的事", "还没解决的"].join("\n");
+    await reply("好。", answer);
+    expect(summaryCalls()).toHaveLength(1);
+    const sent = (summaryCalls()[0]!.messages[0]!.parts[0] as { text: string }).text;
+    const input = JSON.parse(sent) as { summary: string; messages: Array<{ who: string; text: string }> };
+    expect(input.summary).toBe(["人物与称呼", "ffm（@ffm）在群里", "说过的事", "定下的事", "还没解决的"].join("\n"));
+    expect(input.messages.find((l) => l.text === `见和${short(11)}`)).toEqual({ who: "ffm（@ffm）", role: "群成员", text: `见和${short(11)}` });
+    expect(sent).not.toMatch(/〔/);
+    expect((await summaryOf(w.g, w.agent.id))!.text).toBe(["人物与称呼", "ffm（@ffm）在群里", "说过的事", "主人（ffv（@ffv））说了很多", "定下的事", "还没解决的"].join("\n"));
+  });
+
   it("m-11: a rename loses nobody's lines from an older summary: each label is kept by whose it was, then shown and built on as that account is labelled now", async () => {
     const w = await groupWorld("fd", 0);
     // fdn's Agent speaks too: its label follows its owner's handle.
