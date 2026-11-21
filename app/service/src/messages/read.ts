@@ -177,7 +177,7 @@ const NOTHING_LOOKED: Looked = { found: [], queries: [], cites: {} };
  */
 function toWire(
   msg: StoredMessage,
-  visibleQuote: StoredMessage | null,
+  visibleQuote: (StoredMessage & { senderKind?: "human" | "agent" }) | null,
   proposal: ProposalRow | null,
   withReasoning: boolean,
   via: WireVia | null,
@@ -203,6 +203,9 @@ function toWire(
         seq: replyToSeq,
         visible: true,
         senderId: q.kind === "system" ? null : q.senderId,
+        // Whether a person or an Agent wrote it (not secret: the quote names its sender already), so a client can show an
+        // Agent's quoted text without its citations even when it does not hold that Agent (round 3).
+        ...(q.kind !== "system" && q.senderKind ? { senderKind: q.senderKind } : {}),
         text: truncate(wireText(q), QUOTE_MAX_CHARS),
         kind: q.kind === "file" ? "file" : "text",
       };
@@ -301,17 +304,18 @@ export async function toWireForReaders(
   }
 
   const quoting = msgs.filter((m) => typeof m.body.replyToSeq === "number" && shownToAnyone.has(m.id));
-  const quotes = new Map<string, StoredMessage>();
+  const quotes = new Map<string, StoredMessage & { senderKind: "human" | "agent" }>();
   if (quoting.length > 0) {
-    const { rows } = await q.query<MessageRow & { reader_id: string }>(
-      `select r.reader_id, ${MESSAGE_COLUMNS}
+    const { rows } = await q.query<MessageRow & { reader_id: string; sender_kind: "human" | "agent" }>(
+      `select r.reader_id, ${MESSAGE_COLUMNS}, qp.kind as sender_kind
          from unnest($1::uuid[]) as r (reader_id)
          cross join unnest($2::uuid[], $3::bigint[]) as wanted (conversation_id, seq)
          join messages m on m.conversation_id = wanted.conversation_id and m.seq = wanted.seq
+         join principals qp on qp.id = m.sender_id
          ${visibleJoin("r.reader_id")}`,
       [readers, quoting.map((m) => m.conversationId), quoting.map((m) => m.body.replyToSeq)],
     );
-    for (const r of rows) quotes.set(`${r.reader_id}|${r.conversation_id}|${r.seq}`, toStored(r));
+    for (const r of rows) quotes.set(`${r.reader_id}|${r.conversation_id}|${r.seq}`, { ...toStored(r), senderKind: r.sender_kind });
   }
 
   // What a reply's tools found, and what its text cites: each message by the same rule as the reply itself (VISIBLE_JOIN,

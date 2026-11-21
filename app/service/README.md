@@ -2430,10 +2430,13 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
   "kind": "text" | "file" | "system",
   "text": "…",                         // the message; a file message's caption ("" when none); a notice's sentence
   "attachment": { "id": "…", "name": "报告.pdf", "size": 1234, "inline": false },   // file messages only
-  "replyTo": { "seq": 40, "visible": true, "senderId": "…", "text": "<first 200 characters>",
+  "replyTo": { "seq": 40, "visible": true, "senderId": "…", "senderKind": "human" | "agent", "text": "<first 200 characters>",
                "kind": "text" | "file", "attachmentName": "…" /* quoted file messages only */ },
                                        // or { "seq": 7, "visible": false } when you cannot see the quoted message;
-                                       // absent when not a reply. A quoted notice: kind "text", senderId null
+                                       // absent when not a reply. A quoted notice: kind "text", senderId null, no
+                                       // senderKind. senderKind says whether a person or an Agent wrote it (a client
+                                       // shows an Agent's quoted text without its citations, 〔m3〕, whether or not
+                                       // it holds that Agent); a search hit's sender's is in its answer's principals
   "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
   "mentions": [{ "id": "…", "start": 0, "length": 7 }],   // who its mentions mean, as decided when it was sent
                                        // (Mentions): ranges of "text" in UTF-16 code units, ascending; to every reader;

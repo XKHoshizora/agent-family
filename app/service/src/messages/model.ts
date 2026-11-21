@@ -227,6 +227,8 @@ export const wireMessageSchema = z.object({
         seq: z.number(),
         visible: z.literal(true),
         senderId: z.string().nullable(),
+        /** Whether a person or an Agent wrote it (absent for a notice). */
+        senderKind: z.enum(["human", "agent"]).optional(),
         text: z.string(),
         /** What was quoted: a file message may have no caption, so `text` alone cannot say. */
         kind: z.enum(["text", "file"]),
