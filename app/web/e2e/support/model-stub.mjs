@@ -3,7 +3,8 @@
 // Completions, streamed (`POST …/chat/completions`), Anthropic Messages, streamed (`POST …/messages`, the protocol whose
 // thinking the service shows), and the model list both have (`GET …/models`); the wire shapes are those of
 // app/service/tests/helpers/models.ts `protocolStub()`. Tests script it through the control endpoint (control.mjs):
-// what the next calls answer, and what each call was sent.
+// what the next calls answer, and what each call was sent. A step may end in tool calls (`toolCalls`: an OpenAI `tool_calls`
+// delta, an Anthropic `tool_use` block), which is how a spec makes an Agent look something up (`modelStub.callTools`).
 import http from "node:http";
 import { expect } from "@playwright/test";
 import { controlCall } from "./control.mjs";
@@ -60,8 +61,14 @@ function openaiFrames(model, usage) {
     // (Chat Completions has no thinking the service reads: a step's reasoning is not sent on this protocol.)
     reasoning: () => "",
     text: (d) => chunk({ content: d }),
-    end: () =>
-      chunk({}, "stop") +
+    // One tool call, streamed as the real protocol does: its id and name, then its input's JSON in pieces.
+    tool: (call, index) =>
+      chunk({ tool_calls: [{ index, id: call.id, type: "function", function: { name: call.name, arguments: "" } }] }) +
+      chunks(call.args, 8)
+        .map((piece) => chunk({ tool_calls: [{ index, function: { arguments: piece } }] }))
+        .join(""),
+    end: (calls = 0) =>
+      chunk({}, calls > 0 ? "tool_calls" : "stop") +
       sse({
         id: "chatcmpl-e2e",
         object: "chat.completion.chunk",
@@ -95,9 +102,18 @@ function anthropicFrames(model, usage) {
     text: (d) =>
       (open === "text" ? "" : (open === "thinking" ? ev("content_block_delta", { index, delta: { type: "signature_delta", signature: "c2lnbmF0dXJl" } }) : "") + start("text")) +
       ev("content_block_delta", { index, delta: { type: "text_delta", text: d } }),
-    end: () =>
+    tool: (call) => {
+      let out = open === "thinking" ? ev("content_block_delta", { index, delta: { type: "signature_delta", signature: "c2lnbmF0dXJl" } }) : "";
+      out += open ? ev("content_block_stop", { index }) : "";
+      index += 1;
+      open = "tool_use";
+      out += ev("content_block_start", { index, content_block: { type: "tool_use", id: call.id, name: call.name, input: {} } });
+      for (const piece of chunks(call.args, 8)) out += ev("content_block_delta", { index, delta: { type: "input_json_delta", partial_json: piece } });
+      return out;
+    },
+    end: (calls = 0) =>
       (open ? ev("content_block_stop", { index }) : "") +
-      ev("message_delta", { delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: usage.output } }) +
+      ev("message_delta", { delta: { stop_reason: calls > 0 ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: usage.output } }) +
       ev("message_stop"),
   };
 }
@@ -106,7 +122,8 @@ function anthropicFrames(model, usage) {
  * The stub's server. Each streaming call takes the next scripted step (or the default reply) when it arrives:
  * `{text, reasoning?, chunkSize? (code points, default 4), delayMs? (before each piece), waitMs? (once, after the stream's
  * head and before its first piece), usage? ({input, output} tokens), status? (answer with this HTTP error instead), hang?
- * (after the text, hold until released or until the caller goes)}`.
+ * (after the text, hold until released or until the caller goes), toolCalls? (`[{name, input, id?}]`: the round ends in these
+ * calls after its text — the service runs them and calls again, taking the next step), message? (with `status`: the error's text)}`.
  * Every request is recorded: method, path, the Authorization / x-api-key it carried, its JSON body, and whether the
  * caller went away before the answer ended.
  */
@@ -164,7 +181,9 @@ export function startModelStub() {
       await emit("text", rest);
     }
     if (gone) return;
-    res.end(frames.end());
+    const calls = (step.toolCalls ?? []).map((c, i) => ({ id: c.id ?? `call_e2e_${i + 1}`, name: c.name, args: JSON.stringify(c.input ?? {}) }));
+    calls.forEach((c, i) => res.write(frames.tool(c, i)));
+    res.end(frames.end(calls.length));
   }
 
   const server = http.createServer((req, res) => {
@@ -211,7 +230,7 @@ export function startModelStub() {
       const step = queue.shift() ?? { text: DEFAULT_REPLY };
       if (step.status) {
         res.writeHead(step.status, { "content-type": "application/json" });
-        res.end(JSON.stringify({ error: { message: "scripted failure", type: "e2e", code: null } }));
+        res.end(JSON.stringify({ error: { message: step.message ?? "scripted failure", type: "e2e", code: null } }));
         return;
       }
       stream(req, res, record, step, protocol).catch(() => res.destroy());
@@ -282,6 +301,18 @@ export const modelStub = {
   reply: (text, options = {}) => call("script", { steps: [{ text, ...options }] }),
   /** The next call streams `text`, then holds until `release()` (or until the service stops it). */
   hangAfter: (text, options = {}) => call("script", { steps: [{ text, hang: true, ...options }] }),
+  /**
+   * The next call is a round of tool calls: it says `options.text` first when given (what a reply says before it looks
+   * something up: its acknowledgement), then calls `calls` (`[{name, input}]`, in order); the service runs them and
+   * makes its next call, which takes the next step. Other options as a step's (`usage`, `hang`: hold after the text,
+   * before the calls, until `release()`…).
+   */
+  callTools: (calls, options = {}) => call("script", { steps: [{ text: "", ...options, toolCalls: calls }] }),
+  /**
+   * The next call is one an upstream refuses because of its tools (HTTP 400 naming them): the service asks again without
+   * them, and that call takes the next step.
+   */
+  rejectTools: () => call("script", { steps: [{ status: 400, message: "this model does not support tools" }] }),
   /** The oldest holding call goes on with `text` and ends. */
   release: (text = "") => call("release", { text }),
   /** `{requests, pending, holding}`. */
