@@ -10,12 +10,16 @@ export const CitesContext = createContext(null);
 
 const CITATION = /〔(m[1-9][0-9]{0,5})〕/g;
 
+/**
+ * One citation: a `sup` that moves no line, holding a button that is a box as tall as the text line (easy to hit), the
+ * number small at its top — a superscript to look at (styles.css `.cite`).
+ */
 function Cite({ number, at, onJump }) {
   const n = number.slice(1);
   return (
     <sup className="cite">
       <button type="button" title="跳到引用的消息" aria-label={`引用 ${n}`} onClick={() => onJump(at.conversationId, at.seq)}>
-        {n}
+        <span>{n}</span>
       </button>
     </sup>
   );

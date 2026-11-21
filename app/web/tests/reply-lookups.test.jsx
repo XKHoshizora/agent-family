@@ -5,6 +5,7 @@
 // reply one quiet line says what it looked up, and opens the messages it found (each loaded as any one message, each
 // jumping to its place) and, in my Agent's own conversation only, the words it searched for.
 import "./markdown-ready.js";
+import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { cleanup, screen, within } from "@testing-library/react";
 import { A1, AG1, ANN, BO, ME_ID, MODELS, PRINCIPALS, agentConv, agentOf, agentPrincipal, apiError, at, group, runOf, syncOf, wire } from "./fixtures.js";
@@ -274,6 +275,28 @@ describe("what a reply looked up", () => {
     await click(links[1]);
     expect(document.querySelector(".chat-head").textContent).toContain("周末小组");
     expect(storedLi(7).classList.contains("flash")).toBe(true);
+  });
+
+  it("a citation's link is a real box as tall as the text line, its number set high in it as a superscript (final review, item 13)", async () => {
+    const cites = { m1: { conversationId: A1, seq: 2 } };
+    await openChats({ messages: [...BASE, wire(A1, 3, AG1, "你问过〔m1〕。", { lookups: { search: 1 }, cites })] });
+    const [link] = storedLi(3).querySelectorAll("sup.cite > button");
+    // The button is the box; the number is a span inside it.
+    expect(link.querySelector(":scope > span")?.textContent).toBe("1");
+    // jsdom has no layout (an e2e spec could measure): here, the rules the box relies on.
+    const css = readFileSync("src/styles.css", "utf8").replace(/\/\*[\s\S]*?\*\//g, "");
+    const rule = (selector) => new RegExp(`(?:^|\\n)${selector.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} \\{([^}]*)\\}`).exec(css)?.[1] ?? "";
+    // The sup moves no line and takes the line's own height (no line-height of 0, no raise of its own)…
+    expect(rule(".cite")).not.toMatch(/line-height:\s*0/);
+    expect(rule(".cite")).toMatch(/vertical-align:\s*baseline/);
+    expect(rule(".cite")).toMatch(/line-height:\s*inherit/);
+    // …the button is a box of the text's own font and line height…
+    expect(rule(".cite > button")).toMatch(/display:\s*inline-block/);
+    expect(rule(".cite > button")).toMatch(/font:\s*inherit/);
+    expect(rule(".cite > button")).not.toMatch(/font-size/);
+    // …and the number is small, at the top of it.
+    expect(rule(".cite > button > span")).toMatch(/font-size:\s*11px/);
+    expect(rule(".cite > button > span")).toMatch(/vertical-align:\s*top/);
   });
 
   it("a cited reply shown as plain text (too long to render, with the note) keeps its citations as links", async () => {

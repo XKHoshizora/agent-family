@@ -458,13 +458,17 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 }
 .msg-lookups > button:hover { color: var(--purple-dark); }
 .lookup-words { margin: 4px 0 0; }
-/* What a reply cites (〔m3〕): a small superscript number that jumps to the message. */
-.cite { line-height: 0; }
+/* What a reply cites (〔m3〕): a small superscript number that jumps to the message. The sup moves no line (no raise, the
+   line's own height); its button is a box of the text's font and line height, so it is as tall as the line and easy to
+   hit; the number is small, at the box's top. */
+.cite { vertical-align: baseline; font-size: inherit; line-height: inherit; }
 .cite > button {
-  padding: 0 2px; border: 0; background: none; font: inherit; font-size: 11px; color: var(--purple-dark); cursor: pointer;
-  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px;
+  display: inline-block; padding: 0 2px; border: 0; background: none; font: inherit; color: var(--purple-dark); cursor: pointer;
 }
-.cite > button:hover { text-decoration-style: solid; }
+.cite > button > span {
+  font-size: 11px; vertical-align: top; text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px;
+}
+.cite > button:hover > span { text-decoration-style: solid; }
 .lookup-rows { margin: 4px 0 0; padding: 0; list-style: none; border-left: 3px solid var(--line-strong); }
 .lookup-rows > li.muted { padding: 6px 12px; }
 /* A deleted Agent's model where a live one's is switched (its conversation's header, the details panel): a plain label. */
