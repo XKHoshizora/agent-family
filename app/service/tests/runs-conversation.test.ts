@@ -153,7 +153,10 @@ describe("the worker's side of a run in another conversation", () => {
     const ticket = await whileLocked(s.dedicated, async () => {
       const claimed = (await app.agentPort.claimNext())!;
       expect(claimed).toEqual({ id: runId, agentId: s.agent.id, ownerId: s.owner.id, conversationId: s.other });
-      // Nothing of the owner's is there for the Agent to answer: it ends without a call.
+      // The other conversation is a group (not the Agent's own), and the run, made by hand, records no call its Agent can
+      // see there (no message at what it covers, no `call_seqs`): it ends quietly before the conversation is read, with
+      // no call — `cancelled`, no error (port-impl.ts `begin`, `NOTHING_LEFT`; README "Whose joining it reaches back
+      // to"). A reply with nothing to answer in the Agent's own conversation still fails `busy` (context.test.ts).
       expect(await app.agentPort.begin(claimed)).toEqual({ status: "cancelled" });
       return claimed;
     });

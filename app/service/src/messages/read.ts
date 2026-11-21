@@ -200,6 +200,10 @@ function toWire(
       wire.replyTo = { seq: replyToSeq, visible: false };
     }
   }
+  // Who its mentions mean, as stored when it was sent (ids of members then): to every reader of the message alike.
+  if (msg.kind !== "system" && msg.mentions !== null && msg.mentions.length > 0) {
+    wire.mentions = msg.mentions.map(({ id, start, length }) => ({ id, start, length }));
+  }
   if (msg.kind === "system" && typeof msg.body.event === "string") {
     const { text: _text, ...event } = msg.body;
     wire.system = { ...event, event: msg.body.event };

@@ -10,7 +10,7 @@ import { readFileSync } from "node:fs";
 import katex from "katex";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { AgentText } from "../src/pages/AgentChatBits.jsx";
+import { AgentText, StreamingAgentText } from "../src/pages/AgentChatBits.jsx";
 import { fitsMarkdown } from "../src/ui/markdownLimits.js";
 import { APP_CLASSES, TREE_ELEMENTS, safeHref } from "../src/ui/markdownRules.js";
 import { renderToTree } from "../src/ui/markdownPipeline.js";
@@ -314,6 +314,136 @@ describe("what an Agent's Markdown renders to", () => {
     expect(bubble.textContent).toContain("注释内容");
     expect(bubble.querySelector("a")).toBeNull();
     expectSafe(bubble);
+  });
+});
+
+describe("an Agent's stored mentions in its Markdown (Task M)", () => {
+  /** The text with its stored `mentions`, as the conversation shows it, once the worker's answer has come. */
+  async function showWith(text, mentions) {
+    const { container } = render(
+      <div className="bubble">
+        <AgentText text={text} mentions={mentions} />
+      </div>,
+    );
+    return container;
+  }
+  const tags = (root) => [...root.querySelectorAll(".mention")].map((t) => [t.querySelector(".sr-only").textContent, t.querySelector('[aria-hidden="true"]').textContent]);
+
+  it("a mention is a tag over its range, plain at first and in the rendered text; one inside code is plain text there", async () => {
+    const text = "**请** @xiaolin.jarvis 看看，`@bobby.helper` 不叫";
+    const mentions = [
+      { id: AG1, start: 6, length: 15 },
+      { id: ANN, start: 26, length: 13 },
+    ];
+    const root = await showWith(text, mentions);
+    expect(tags(root)).toEqual([
+      ["提到 xiaolin.jarvis", "@xiaolin.jarvis"],
+      ["提到 bobby.helper", "@bobby.helper"],
+    ]);
+    await settle();
+    expect(root.querySelector(".md strong").textContent).toBe("请");
+    expect(tags(root.querySelector(".md"))).toEqual([["提到 xiaolin.jarvis", "@xiaolin.jarvis"]]);
+    expect(root.querySelector(".md code").textContent).toBe("@bobby.helper");
+    expect([...root.textContent].filter((ch) => ch === String.fromCharCode(0xfdd0) || ch === String.fromCharCode(0xfdd1))).toEqual([]);
+    expectSafe(root);
+  });
+
+  it("in a list, a quote and a link's text: tags where text is, plain inside the link; without mentions nothing is marked", async () => {
+    const text = "- @阿波 一\n> @小安 二\n\n[@阿波](https://x.example/)";
+    const mentions = [
+      { id: ANN, start: 2, length: 3 },
+      { id: ANN, start: 10, length: 3 },
+      { id: ANN, start: 18, length: 3 },
+    ];
+    const root = await showWith(text, mentions);
+    await settle();
+    expect(tags(root.querySelector(".md li"))).toEqual([["提到 阿波", "@阿波"]]);
+    expect(tags(root.querySelector(".md blockquote"))).toEqual([["提到 小安", "@小安"]]);
+    expect(root.querySelector(".md a").textContent).toBe("@阿波");
+    const plain = await showWith("**@阿波** 你好", null);
+    await settle();
+    expect(plain.querySelector(".mention")).toBeNull();
+    expect(plain.querySelector(".md strong").textContent).toBe("@阿波");
+  });
+
+  it("a mention inside an address is no tag, and the link goes exactly where its text says (fix round 1, I-3)", async () => {
+    const url = "https://example.com/@anna";
+    const root = await showWith(`主页 ${url} 和 [这里](https://x.example/u/@anna)`, [
+      { id: ANN, start: 23, length: 5 },
+      { id: ANN, start: 56, length: 5 },
+    ]);
+    await settle();
+    expect(hrefs(root)).toEqual([url, "https://x.example/u/@anna"]);
+    expect(root.querySelector(".mention")).toBeNull();
+    expect(root.querySelector(".md").innerHTML).not.toMatch(/%EF%B7%9|%ef%b7%9/);
+    expectSafe(root);
+  });
+
+  it("a stored mention inside an address is no tag in the plain rendering either (tidy round, m-10)", async () => {
+    // (Stored before mentions in addresses were refused: an older message may hold one.)
+    const root = await showWith("主页 https://example.com/@anna 和 @阿波", [
+      { id: ANN, start: 23, length: 5 },
+      { id: ANN, start: 31, length: 3 },
+    ]);
+    expect(tags(root).map(([, shown]) => shown)).toEqual(["@阿波"]);
+    await settle();
+    expect(tags(root).map(([, shown]) => shown)).toEqual(["@阿波"]);
+  });
+
+  it("marks already in a text make no tag, plain or rendered, stored or being written (fix round 1, M-1)", async () => {
+    const [open, close] = [String.fromCharCode(0xfdd0), String.fromCharCode(0xfdd1)];
+    const forged = `看 ${open}@阿波${close} 这个`;
+    const root = await showWith(forged, null);
+    expect(root.querySelector(".mention")).toBeNull();
+    await settle();
+    expect(root.querySelector(".mention")).toBeNull();
+    expect(root.textContent).toContain("@阿波");
+    const { container } = render(
+      <div className="bubble">
+        <StreamingAgentText text={forged} />
+      </div>,
+    );
+    await settle();
+    expect(container.querySelector(".mention")).toBeNull();
+  });
+
+  it("one forged mark in a reply hides only itself: the reply's stored mentions are still tags (fix round 2, M-4)", async () => {
+    const forged = `${String.fromCharCode(0xfdd0)}看 @阿波 和 @小安`;
+    const root = await showWith(forged, [
+      { id: ANN, start: 3, length: 3 },
+      { id: ANN, start: 9, length: 3 },
+    ]);
+    expect(tags(root)).toEqual([
+      ["提到 阿波", "@阿波"],
+      ["提到 小安", "@小安"],
+    ]);
+    await settle();
+    expect(tags(root.querySelector(".md"))).toEqual([
+      ["提到 阿波", "@阿波"],
+      ["提到 小安", "@小安"],
+    ]);
+  });
+
+  it("the worker takes marks out of a link's address, as they are or percent-encoded (fix round 2, M-5)", () => {
+    const [open, index, close] = [0xfdd0, 0xfdd2, 0xfdd1].map((c) => String.fromCharCode(c));
+    const tree = renderToTree(`[一](https://x.example/u/${open}${index}@a${close}) [二](https://x.example/%EF%B7%90b%ef%b7%91)`, { now: () => 0 });
+    const hrefs = [];
+    const walk = (nodes) => {
+      for (const n of nodes) {
+        if (typeof n === "string") continue;
+        if (n.tag === "a") hrefs.push(n.props.href);
+        walk(n.children ?? []);
+      }
+    };
+    walk(tree.tree);
+    expect(hrefs).toEqual(["https://x.example/u/@a", "https://x.example/b"]);
+  });
+
+  it("an escaped \\@ keeps its tag and shows no backslash (fix round 1, M-10)", async () => {
+    const root = await showWith("转义 \\@阿波 好", [{ id: ANN, start: 4, length: 3 }]);
+    await settle();
+    expect(root.querySelector(".md").textContent).toBe("转义 提到 阿波@阿波 好");
+    expect(tags(root.querySelector(".md"))).toEqual([["提到 阿波", "@阿波"]]);
   });
 });
 

@@ -185,10 +185,20 @@ describe("the header and the list row", () => {
     expect(receipt(2)).toBe("已发送 · 没点名，它不会回复");
     cleanup();
 
-    // Named by handle or by name (any case), it will answer: plain 已发送.
-    await openAgentChat({ agent: { replyMode: "mention" }, messages: [...BASE, wire(A1, 3, ME_ID, "@Helper 在吗"), wire(A1, 4, ME_ID, "@小助手 在吗")] });
+    // Named — as the service stored it when it was sent (Task M: picked, or typed by handle or by name) — it will answer:
+    // plain 已发送. Its text alone is not read: a message the service stored no mention of it for is not named.
+    await openAgentChat({
+      agent: { replyMode: "mention" },
+      messages: [
+        ...BASE,
+        wire(A1, 3, ME_ID, "@Helper 在吗", { mentions: [{ id: AG1, start: 0, length: 7 }] }),
+        wire(A1, 4, ME_ID, "@小助手 在吗", { mentions: [{ id: AG1, start: 0, length: 4 }] }),
+        wire(A1, 5, ME_ID, "@小助手 在吗"),
+      ],
+    });
     expect(receipt(3)).toBe("已发送");
     expect(receipt(4)).toBe("已发送");
+    expect(receipt(5)).toBe("已发送 · 没点名，它不会回复");
     cleanup();
 
     // Paused wins over the mode; read stays 已读.
@@ -441,7 +451,8 @@ describe("the streaming bubble", () => {
 
   it("is never announced piece by piece: busy while it streams, the stored reply is announced once", async () => {
     const { transport } = await openAgentChat();
-    const live = document.querySelector('.chat [aria-live="polite"]');
+    // (The chat's own region, not the composer's, which tells of its mentions.)
+    const live = document.querySelector('.chat > [aria-live="polite"]');
     await runPush(transport, runOf(R1, "running"));
     await deltaPush(transport, { text: "第一段" });
     expect(bubbleLi().getAttribute("aria-busy")).toBe("true");
@@ -1666,24 +1677,27 @@ describe("scrolling", () => {
 });
 
 describe("mentions", () => {
-  it("@ offers the Agent with its account name, and choosing it inserts @ and its account name", async () => {
-    await openAgentChat({ agent: { replyMode: "mention" } });
+  it("@ offers the Agent with its account name; choosing it inserts a tag of its name, sent with its id (Task M)", async () => {
+    const { api } = await openAgentChat({ agent: { replyMode: "mention" } });
     fireEvent.change(input(), { target: { value: "@", selectionStart: 1, selectionEnd: 1 } });
     const option = screen.getByRole("option", { name: /小助手/ });
     expect(option.textContent).toContain("@helper");
     expect(option.textContent).toContain("Agent · 主人：你");
     fireEvent.click(option);
-    expect(input().value).toBe("@helper ");
+    expect(input().value).toBe("@小助手 ");
+    expect([...document.querySelectorAll(".composer-mirror .mention-chip")].map((c) => c.textContent)).toEqual(["@小助手"]);
+    fireEvent.keyDown(input(), { key: "Enter" });
+    expect(api.sendMessage).toHaveBeenLastCalledWith(A1, expect.objectContaining({ text: "@小助手", mentions: [{ id: AG1, start: 0, length: 4 }] }));
   });
 
-  it("an Agent's account name is its owner's and its name part (family names): the picker finds it by either and inserts the full one", async () => {
+  it("an Agent's account name is its owner's and its name part (family names): the picker finds it by either", async () => {
     await openAgentChat({ agent: { replyMode: "mention", handle: "me_one.helper" } });
     fireEvent.change(input(), { target: { value: "@me_one.he", selectionStart: 10, selectionEnd: 10 } });
     const option = screen.getByRole("option", { name: /小助手/ });
     expect(option.textContent).toContain("@me_one.helper");
     fireEvent.change(input(), { target: { value: "@help", selectionStart: 5, selectionEnd: 5 } });
     fireEvent.click(screen.getByRole("option", { name: /小助手/ }));
-    expect(input().value).toBe("@me_one.helper ");
+    expect(input().value).toBe("@小助手 ");
   });
 });
 
@@ -1714,7 +1728,7 @@ describe("Agents in a group (batch 2C)", () => {
   const haltButton = () => screen.queryByRole("button", { name: /让 Agent 停下|处理中…/ });
   const groupCalls = (transport) => transport.agentLog.filter((x) => Array.isArray(x) && x[0] === "groupRuns").map((x) => x[1]);
 
-  it("the @ picker shows each Agent with its account name and owner; choosing one inserts @ and its account name, a person stays @ and the name", async () => {
+  it("the @ picker shows each Agent with its account name and owner; choosing one inserts a tag of its name, as a person's is", async () => {
     await openGroup();
     fireEvent.change(input(), { target: { value: "@", selectionStart: 1, selectionEnd: 1 } });
     const theirs = screen.getByRole("option", { name: /安的助手/ });
@@ -1723,10 +1737,11 @@ describe("Agents in a group (batch 2C)", () => {
     expect(theirs.textContent).not.toContain("已暂停");
     expect(screen.getByRole("option", { name: /小助手/ }).textContent).toContain("Agent · 主人：你 · 已暂停");
     fireEvent.click(theirs);
-    expect(input().value).toBe("@annbot ");
-    fireEvent.change(input(), { target: { value: "@annbot @", selectionStart: 9, selectionEnd: 9 } });
+    expect(input().value).toBe("@安的助手 ");
+    fireEvent.change(input(), { target: { value: "@安的助手 @", selectionStart: 7, selectionEnd: 7 } });
     fireEvent.click(screen.getByRole("option", { name: /阿波/ }));
-    expect(input().value).toBe("@annbot @阿波 ");
+    expect(input().value).toBe("@安的助手 @阿波 ");
+    expect([...document.querySelectorAll(".composer-mirror .mention-chip")].map((c) => c.textContent)).toEqual(["@安的助手", "@阿波"]);
   });
 
   it("a message of someone else's Agent shows its tag, its real owner and its Markdown, and none of the owner's controls", async () => {
@@ -1936,7 +1951,7 @@ describe("Agents in a group (batch 2C)", () => {
     await push(transport, groupRun(OAG, { state: "replying" }));
     expect(replyingRows()).toHaveLength(1);
     expect(haltButton()).toBeNull();
-    await push(transport, { type: "message", message: wire(G1, 2, OAG, "问问 @helper 吧") });
+    await push(transport, { type: "message", message: wire(G1, 2, OAG, "问问 @helper 吧", { mentions: [{ id: AG1, start: 3, length: 7 }] }) });
     await push(transport, groupRun(OAG, { state: null }));
     expect(replyingRows()).toHaveLength(0);
     expect(haltButton()).toBeTruthy();
@@ -1958,11 +1973,17 @@ describe("Agents in a group (batch 2C)", () => {
 
   it("让 Agent 停下 stays away when no Agent calls another; a refusal says why", async () => {
     const haltAgents = vi.fn(async () => Promise.reject(apiError(429, "rate_limited")));
-    const { transport } = await openGroup([wire(G1, 1, OAG, "我是 @annbot，有事找 @ann")], { api: { haltAgents } });
+    const { transport } = await openGroup(
+      [wire(G1, 1, OAG, "我是 @annbot，有事找 @ann", { mentions: [{ id: OAG, start: 3, length: 7 }, { id: ANN, start: 15, length: 4 }] })],
+      { api: { haltAgents } },
+    );
     expect(haltButton()).toBeNull();
-    await push(transport, { type: "message", message: wire(G1, 2, ANN, "@helper @annbot 你们聊") });
+    await push(transport, { type: "message", message: wire(G1, 2, ANN, "@helper @annbot 你们聊", { mentions: [{ id: AG1, start: 0, length: 7 }, { id: OAG, start: 8, length: 7 }] }) });
     expect(haltButton()).toBeNull();
-    await push(transport, { type: "message", message: wire(G1, 3, AG1, "@annbot 交给你了") });
+    // An Agent's message naming another Agent in its text only (nothing stored for it) calls nobody.
+    await push(transport, { type: "message", message: wire(G1, 3, AG1, "@annbot 等等") });
+    expect(haltButton()).toBeNull();
+    await push(transport, { type: "message", message: wire(G1, 4, AG1, "@annbot 交给你了", { mentions: [{ id: OAG, start: 0, length: 7 }] }) });
     await click(haltButton());
     expect(toastText()).toBe("叫停太频繁了，请稍等一会儿再试。");
     expect(haltButton().disabled).toBe(false);

@@ -1,5 +1,5 @@
 // The local system under test, run from the Playwright runner process: build the client and the service, give
-// the af_e2e database a fresh start, start the model stub (model-stub.mjs) and the judgement stub (judge-stub.mjs), run
+// the suite's database (E2E_DATABASE, af_e2e by default) a fresh start, start the model stub (model-stub.mjs) and the judgement stub (judge-stub.mjs), run
 // ONE service process that serves the built client, whose site models are the model stub and whose judgement model is
 // the judgement stub, and let test workers stop and start that process and script or read the stubs through a small
 // control endpoint (127.0.0.1, random port, random token).
@@ -128,10 +128,33 @@ async function healthy() {
   }
 }
 
-/** Runs the migrations on af_e2e, then empties every table but the migrations' own (the extensions stay). */
+/**
+ * Creates the suite's database (E2E_DATABASE) on the server when it is not there yet (as the service's sharded test
+ * runner does); an existing one is left as it is — and is then migrated and emptied (README). Two runs creating the same
+ * new name at once: the one that loses finds it made (`duplicate_database`), and goes on.
+ */
+async function ensureDatabase(pg) {
+  const admin = new pg.Client({ connectionString: e2eDatabaseUrl("postgres") });
+  await admin.connect();
+  try {
+    const { rowCount } = await admin.query("select 1 from pg_database where datname = $1", [E2E_DATABASE]);
+    if (rowCount === 0) {
+      try {
+        await admin.query(`create database "${E2E_DATABASE}"`);
+      } catch (error) {
+        if (error?.code !== "42P04") throw error;
+      }
+    }
+  } finally {
+    await admin.end();
+  }
+}
+
+/** Runs the migrations on the suite's database (E2E_DATABASE), then empties every table but the migrations' own (the extensions stay). */
 async function freshDatabase() {
-  runCli(["migrate"]);
   const pg = createRequire(path.join(SERVICE_DIR, "package.json"))("pg");
+  await ensureDatabase(pg);
+  runCli(["migrate"]);
   const client = new pg.Client({ connectionString: e2eDatabaseUrl() });
   await client.connect();
   try {
@@ -300,7 +323,7 @@ export async function startLocalSystem() {
   const judgeStub = await startJudgeStub();
   const service = createService(
     serviceEnv({
-      // The test-only entry starts only so, and only on af_e2e (e2e-server.ts).
+      // The test-only entry starts only so, and only on a database whose name ends in _e2e (e2e-server.ts).
       NODE_ENV: "test",
       DATABASE_URL: e2eDatabaseUrl(),
       APP_ORIGIN: BASE_URL,

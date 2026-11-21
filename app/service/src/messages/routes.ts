@@ -33,6 +33,9 @@ const sendBody = z
     attachmentId: uuidParam.optional(),
     replyToSeq: positiveInt.optional(),
     clientTxn: z.string().regex(/^[A-Za-z0-9_-]{1,64}$/),
+    // Mentions picked from the @ list (Task M): ranges of `text` as stored; checked against it and the members in the
+    // send (400 `bad_mentions`). More than a hundred is no list a client makes.
+    mentions: z.array(z.strictObject({ id: uuidParam, start: z.number().int(), length: z.number().int() })).max(100).optional(),
   })
   .refine(
     (b) => b.attachmentId !== undefined || (b.text !== undefined && hasVisibleText(b.text)),
@@ -72,7 +75,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
       await sendLimit(req, me.id);
 
       // Rendered inside the transaction, under the locks that just proved the sender may read it. An owner's
-      // message to their Agent, and a message in a group naming Agent members by @handle, queue their replies in the
+      // message to their Agent, and a message in a group whose mentions (decided in the send) mean Agent members, queue their replies in the
       // same transaction (agents/runs.ts `maybeTrigger`; over an owner's replies a minute, a failed `rate_limited` run
       // instead). Each is announced to its own Agent's owner. A call over its sender's limit on other people's Agents
       // starts nothing: it is logged, and the sender alone is told which in this answer (`notCalled`). A call on someone

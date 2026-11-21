@@ -10,6 +10,9 @@
 // the text before it is shown either way.
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
+import { mentionsIn, outsideAddresses } from "../data/mentions.js";
+import { markMentions, withoutMarks, withoutMarksKeeping } from "./mentionMarks.js";
+import { MentionText } from "./MentionText.jsx";
 import { DROPPED, markdownClient, withNote } from "./markdownClient.js";
 import { withoutBidiControls } from "./markdownRules.js";
 import { inFrame, useMarkdownView } from "./markdownView.jsx";
@@ -45,23 +48,27 @@ export function loadMarkdown(load = () => import("./Markdown.jsx")) {
 }
 
 /** The tree, once its chunk is here (suspends until then); says when it is shown (its height changed). */
-function LoadedTree({ tree, view }) {
+function LoadedTree({ tree, view, mentionIds }) {
   const { RichTree } = use(loadMarkdown());
   useLayoutEffect(() => view.changed(), [view, tree]);
-  return <RichTree tree={tree} />;
+  return <RichTree tree={tree} mentionIds={mentionIds} />;
 }
 
-/** A checked tree shown, or `plain` while its chunk loads, if it cannot be loaded, or if showing it fails. */
-function Rich({ tree, plain, view }) {
+/**
+ * A checked tree shown, or `plain` while its chunk loads, if it cannot be loaded, or if showing it fails. `mentionIds`:
+ * who each marked mention means, by its index (mentionMarks.js).
+ */
+function Rich({ tree, plain, view, mentionIds = NO_IDS }) {
   if (markdownChunk?.status === "rejected") return plain;
   return (
     <ChunkBoundary fallback={plain} resetKey={tree}>
       <Suspense fallback={plain}>
-        <LoadedTree tree={tree} view={view} />
+        <LoadedTree tree={tree} view={view} mentionIds={mentionIds} />
       </Suspense>
     </ChunkBoundary>
   );
 }
+const NO_IDS = Object.freeze([]);
 
 /** Tells the view when what a text shows changes kind (plain, with the note, rich): its height may have changed. */
 function useShownKind(view, kind) {
@@ -72,8 +79,8 @@ function useShownKind(view, kind) {
   }, [view, kind]);
 }
 
-/** A plain result as shown: the text, with the note when it was too complex or too slow. */
-const plainOf = (text, result) => (withNote(result) ? <PlainWithNote text={text} /> : text);
+/** A plain result as shown: the text (`plain`, its mentions as tags), with the note when it was too complex or too slow. */
+const plainOf = (plain, result) => (withNote(result) ? <PlainWithNote text={plain} /> : plain);
 
 /**
  * Shows `rendered` elements of a tree if the conversation's budget allows (it may push others far from view back to
@@ -129,43 +136,56 @@ const plainKnown = (client, text) => {
 /**
  * The text of an Agent's stored message. `id`: the message's (where the browser cannot tell what is near, the newest
  * Agent texts are). Asked for once near — of the worker or of the answers the client has kept, alike; once rich it
- * stays rich while shown (unless the budget pushes it back).
+ * stays rich while shown (unless the budget pushes it back). `mentions`: its stored mentions (ranges of `text`), shown
+ * as tags — plain, and in the rich tree, where the worker is asked for the text with each mention between two marks
+ * (mentionMarks.js; Markdown.jsx turns them into tags, and inside code into nothing: plain text there).
  */
-export const AgentText = memo(function AgentText({ text, id = null }) {
-  const shown = useMemo(() => withoutBidiControls(text), [text]);
+export const AgentText = memo(function AgentText({ text, id = null, mentions = null }) {
+  // The mentions, as a key that stays the same while they do (the message's view is made again at every change).
+  const key = Array.isArray(mentions) ? mentions.map((m) => `${m?.id}:${m?.start}:${m?.length}`).join(",") : "";
+  // Any mark of mentionMarks.js the text holds itself is taken out, the mentions moved onto what is left (only marks put
+  // in here make a tag, M-1; a forged one hides only itself, fix round 2 M-4); then bidirectional controls. (The service
+  // keeps none of those in a reply: when it took any out, the mentions are not shown.)
+  const unmarked = useMemo(() => withoutMarksKeeping(text, mentions), [text, key]);
+  const shown = useMemo(() => withoutBidiControls(unmarked.text), [unmarked]);
+  // (None inside an address, in the plain text as in the rendered one: tidy round, m-10.)
+  const tags = useMemo(() => (shown === unmarked.text ? outsideAddresses(shown, mentionsIn(shown, unmarked.mentions)) : []), [shown, unmarked]);
+  const asked = useMemo(() => markMentions(shown, tags), [shown, tags]);
+  const mentionIds = useMemo(() => tags.map((t) => t.id), [tags]);
+  const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : shown;
   const client = markdownClient();
   const view = useMarkdownView();
   const host = useRef(null);
   const { near, epoch } = useNear(view, host, id);
-  const [held, setHeld] = useState(() => ({ text: shown, result: plainKnown(client, shown) }));
-  const result = held.text === shown ? held.result : null;
+  const [held, setHeld] = useState(() => ({ text: asked, result: plainKnown(client, asked) }));
+  const result = held.text === asked ? held.result : null;
 
   useEffect(() => {
     if (result) return undefined;
-    const now = plainKnown(client, shown);
+    const now = plainKnown(client, asked);
     if (now) {
-      setHeld({ text: shown, result: now });
+      setHeld({ text: asked, result: now });
       return undefined;
     }
     if (!near) return undefined;
     loadMarkdown();
     let wanted = true;
-    client.request(shown, { wanted: () => wanted, priority: () => view.distance(host.current) }).then((answer) => {
-      if (wanted && answer !== DROPPED) setHeld({ text: shown, result: answer });
+    client.request(asked, { wanted: () => wanted, priority: () => view.distance(host.current) }).then((answer) => {
+      if (wanted && answer !== DROPPED) setHeld({ text: asked, result: answer });
     });
     return () => {
       wanted = false;
     };
-  }, [client, view, shown, near, result]);
+  }, [client, view, asked, near, result]);
 
   const granted = useBudget(view, host, result, epoch, true);
-  let body = shown;
+  let body = plain;
   let kind = "plain";
   if (result?.plain) {
-    body = plainOf(shown, result);
+    body = plainOf(plain, result);
     kind = withNote(result) ? "note" : "plain";
   } else if (result?.tree && granted) {
-    body = <Rich tree={result.tree} plain={shown} view={view} />;
+    body = <Rich tree={result.tree} plain={plain} view={view} mentionIds={mentionIds} />;
     kind = "rich";
   }
   useShownKind(view, kind);
@@ -239,7 +259,8 @@ const StreamRich = memo(Rich);
  * The stored message that replaces this is rendered on its own.
  */
 export function StreamingAgentText({ text, paced = false, ended = false, endWithin = undefined, all = false, resumeAt = 0, placeholder = null, onShown = null }) {
-  const received = useMemo(() => withoutBidiControls(text), [text]);
+  // (Any mark of mentionMarks.js the text holds itself is taken out: a reply being written has no stored mention, M-1.)
+  const received = useMemo(() => withoutMarks(withoutBidiControls(text)), [text]);
   const epoch = useEpoch(received);
   const upTo = useReveal(received, epoch, { paced, ended, endWithin, all, resumeAt });
   const shown = upTo === received.length ? received : received.slice(0, upTo);

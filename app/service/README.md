@@ -184,7 +184,8 @@ it; `app.staleRunSweep.run()` sweeps at once either way (see Agents and runs, Re
 that called no Agent, it waits until nobody has written there for `PROACTIVE.debounceMs`, then has the latest message
 judged once and acts on the outcome as on a mention's (notices published, runs announced). A message that called an
 Agent — one the trigger acted on or refused — cancels the wait, and so does an Agent's post there; any other message
-replaces the one waiting, also one naming an Agent by `@handle` that the trigger ignored, whose decision then refuses it.
+replaces the one waiting, also one whose stored mentions name an Agent the trigger ignored, whose decision then refuses
+it.
 At most 8 decisions are in flight at once, all groups together, and the judgement model is asked at most
 `PROACTIVE.perGroupHour` times about one group and `PROACTIVE.perSenderHour` about one sender's messages within an hour
 (Proactive replies, When a message is judged). In
@@ -464,8 +465,95 @@ and calls nobody (`@old` or `@old.jarvis`) while it is not their handle; its for
 year has passed. (WeChat's rule — a released WeChat ID is never anyone else's — rather than GitHub's, which frees an old
 name at once and so invites impersonation.) How a message calls an Agent by its handle, in full or by the name part
 alone: Agents and runs, In a group. A member whose display name is an Agent's name part (「jarvis」) makes a bare `@jarvis`
-call nobody in the groups they are in — people first; anyone may take that display name — while the full form
-`@owner.jarvis` always calls the Agent.
+typed by hand call nobody in the groups they are in — people first; anyone may take that display name — while the full
+form `@owner.jarvis` always calls the Agent, and an Agent picked from the @ list is always that Agent (Mentions).
+
+### Mentions
+
+Who a mention means is decided once, when the message is sent, and stored with the message; nothing ever reads mention
+text again to decide who was meant (`src/agents/mentions.ts`, migration 049). A rename, a new member with the same name,
+a display name equal to someone's Agent — none of these changes a message already sent, and none can make a mention
+picked from the @ list mean anyone but the one picked.
+
+- **Stored** (`messages.mentions`): `[{"id", "start", "length"}]` — whom the mention means (a member of the
+  conversation when the message was sent) and the range of the message's text that names them. `start` and `length`
+  count **UTF-16 code units** of the text as stored (after the send's trimming and removals; a JavaScript string's
+  indices, so an emoji counts 2), ascending, not overlapping, each range beginning with `@`; at most 20 per message.
+  Null when the message names nobody — and for every message stored before mentions were, which names nobody whatever
+  its text says.
+- **Picked**: the client sends each mention picked from the @ list with its id and range (`mentions` of
+  `POST /api/conversations/:id/messages`). The text in a range is the name as the sender saw it (`@Jarvis Lee`,
+  `@贾维斯`), one `@name`: `@` and a name of at most 49 characters, with no space at either end of it and no line break
+  inside. Each is checked against the text as stored and the conversation's current members — and is no part of an
+  address (below) — anything wrong is 400 `bad_mentions` and nothing is stored.
+- **Typed**: an `@…` typed and not picked — outside every picked range, and outside code — is read once, at send, by the
+  reading of handles (Handles; Agents and runs, In a group): a full handle `@owner.name` is that Agent; a bare `@name` is
+  the person member with that handle, else the one person member whose display name it is (one word, case ignored),
+  else the one Agent member with that name part. What it finds is stored as further entries, each with the range of the
+  `@…` it matched (every occurrence); what means nobody — two Agents of one name part, two people of one name, an
+  Agent outside the conversation, a handle nobody has — stores nothing. Nothing in code is read, nor anything in an
+  address. In an Agent's own
+  conversation the Agent is also named as it always was there: by its full handle or name part as a whole mention, and
+  by `@` and its name anywhere (case ignored) but in code or an address (the same test as the handles). At most the first 20 distinct handles are looked up; the picked entries
+  come first when the 20 places run out.
+- **Asked, not named** (`messages.asks_agent`, never sent to anyone): decided by the same reading at the same moment,
+  whether a typed `@…` asked an Agent it could not name — the full handle of an Agent that is not one of the
+  conversation's (or of two live ones), or a bare name two or more Agent members share and no person has. Such a message
+  is no one the proactive judgement answers (whoever asks an Agent asked that one, and none other answers in its place),
+  as before mentions were stored.
+- **Code** — the exact rule, which follows the CommonMark the web renders with for these cases:
+  - a fenced block (``` or ~~~, three or more), from its opening fence line — which may follow quote markers,
+    indentation and list markers (`- ```js`) — to the closing one (the same character, at least as many, nothing but
+    spaces after them) or to the end of the text; a backtick fence's info string holds no backtick;
+  - an indented code block: lines indented 4 columns or more (a tab to the next multiple of 4), the first at the start
+    of the text or after a blank line, unless the text before that blank line is a list item (its marker line or a line
+    indented under it) — there indented lines are the item's own text, as Markdown has it; blank lines inside the block
+    are part of it.
+  - outside those, a backtick span: a run of backticks up to the next run of exactly as many within one paragraph (a
+    blank line ends it); a backtick after an odd number of backslashes is text, and so is a run nothing closes.
+
+  Where this differs from the CommonMark the web renders an Agent's reply with, and who it touches:
+  - A block indented deeper than its list item's text — code nested in a list item — is read as the item's text here;
+    the web shows it as code. So a handle shown as nested code **can still call** the Agent whose handle it holds: a
+    member who posts such a block in a group, or an Agent whose reply holds one (a model explaining `@owner.name`
+    inside a list item), calls that Agent, and the sender — or the calling Agent's owner — pays as for any call.
+    Fenced code in a list item (the common shape of model output) is handled.
+  - The same direction (read as text here, shown as code on the web), with the same effect: an indented block directly
+    after a heading or a fence's closing line (no blank line between), and one after `>` quote markers.
+  - The opposite direction (code here, text on the web): a lazy continuation line followed by a blank line and an
+    indented line. A handle there is neither stored nor called, and is shown as plain text. Rare.
+- **An address** is no one addressed: an `@` right after `/` (`example.org/@anna`), or inside a URL (a scheme and `://`,
+  or `www.`, up to white space or `<` `>`) or a Markdown link's target (`](` up to `)` or white space), is not read, and a
+  picked range there is 400 `bad_mentions` (the web's composer turns such a tag into plain text before it is sent, and
+  says so under the box). A scheme counts only where a run of its characters (`A–Z a–z 0–9 + . -`) begins, as GFM's
+  autolinks have it (`1http://x` is no URL; it was one before fix round 2). A picked tag's own text is never read as an
+  address — the tag is decided by its id, so a person named `www.anna` or `a://b` is picked like anyone — while an
+  address that runs into a tag (`https://x.example?n=@anna`) still holds it. The pattern (`ADDRESS_PATTERN`,
+  `src/agents/mentions.ts`) and the test (`addressRanges`, `inAddress`) are the web's (`app/web/src/data/mentions.js`)
+  character for character: both test suites assert the shared table `app/shared/address-cases.json`. The addresses are
+  found once per text (not at all in a text without an `@`); the whole reading at send (code, addresses, `@…`) is linear
+  in the text, whatever it holds, tested at the longest a message's text may be in UTF-16 code units (`MESSAGE_TEXT_MAX`
+  is 8 000 code points, `src/messages/send.ts`: up to 16 000 units) against a quarter of it.
+- **Consequences of these rules**, as they stand:
+  - `@anna/@bob` and `A/@B` read nobody for the second name (the `/` rule).
+  - A URL glued to Chinese punctuation or text swallows a following `@name` up to the next white space
+    (`https://x.com/a，@贾维斯 帮我看` calls nobody, silently). It agrees with how GFM links it, so the reader sees a link,
+    but the sender who typed the `@` by hand gets no reply and no hint. The picker cannot be used there (it needs white
+    space before `@`).
+  - A mention in link TEXT is stored and may call an Agent, but is drawn as a plain link, not a tag.
+  - For people's messages the web draws no Markdown, so the widened code rules (list fences, indented blocks) switch off
+    a typed call for text the UI does not show as code.
+- **An Agent's reply** is text from a model: it is read the same way, once, when it is posted (`postAsAgent`), and its
+  entries (and `asks_agent`) are stored the same way. (The group's system text tells it to write `@` and an Agent's
+  full handle to call it.)
+- **What a model is shown** of a message with mentions is its text as sent (a picked Agent may read `@贾维斯` there);
+  the stored entries are never put into a model's context.
+- **Readers** — the triggers (a person's message in a group or to their Agent in `mention` mode, an Agent's reply), the
+  calls a reply records (`call_seqs`) and so its follow-up, the proactive judgement's "names an Agent", the web's
+  让 Agent 停下 — all read the stored entries. An entry whose principal has since left or been deleted stays as data and
+  calls nobody new. Old messages are never rewritten.
+- **On the wire**: `mentions` goes out with the message (WireMessage) to everyone who can read it; its ids are of
+  members, nothing anyone could not see before. `asks_agent` never goes out.
 
 ### Agents
 
@@ -2093,7 +2181,13 @@ owner also removes their Agent.
   control character, not a default-ignorable code point (`\p{Default_Ignorable_Code_Point}`: format
   characters, joiners, variation selectors, tag characters, Hangul fillers U+115F/U+1160/U+3164/U+FFA0, the
   combining grapheme joiner, …) and not the Braille blank U+2800 (emoji sequences, keycaps, flags and
-  right-to-left text all have one); a caption may be empty or invisible.
+  right-to-left text all have one); a caption may be empty or invisible. `mentions` (optional, at most 100 entries in
+  the body): the mentions picked from the @ list, `[{"id", "start", "length"}]` (Mentions) — ranges of `text` as it is
+  stored (UTF-16 code units, after the removals and the trim above), ascending, not overlapping, each one `@name`
+  (Mentions: at most 1 + 49 characters, no space at its ends, no line break) not ending inside a surrogate pair and not
+  in an address, at most 20, each `id` a current member of the conversation (a person, or an Agent that is not
+  deleted); anything else 400 `bad_mentions` and nothing is stored. What is typed outside them is
+  read once now (Mentions); the message is stored, and answered, with `mentions` as decided.
 - 201 `{"message": WireMessage, "duplicate": false}`, and, only when the message called someone else's Agent in a group
   and your own calls a minute on other people's Agents refused it (`AGENT_CALLER_RUNS_PER_MINUTE`, Rate limits),
   `"notCalled": [{"agentId", "reason": "caller_rate_limited"}]`, one entry per Agent it did not reach, in id order
@@ -2107,10 +2201,10 @@ owner also removes their Agent.
   under it is no longer visible to you (you left and were added again).
 - Errors: 404 `not_found` (not a current member, closed, unknown), 403 `cannot_send` with `reason`
   `blocked` or `not_friends` (direct chats), 400 `invalid_request` (empty text without attachment, a
-  `replyToSeq` you cannot see, an attachment that is not your unsent upload here).
+  `replyToSeq` you cannot see, an attachment that is not your unsent upload here), 400 `bad_mentions` (above).
 - In your Agent's conversation, a message (not a repeat) may start the Agent's reply in the same transaction, or be
-  folded into the one in progress (see Agents and runs). In a group, so may a message that calls an Agent member by
-  `@handle` (Agents and runs, In a group).
+  folded into the one in progress (see Agents and runs). In a group, so may a message whose mentions mean an Agent
+  member (Mentions; Agents and runs, In a group).
 - Limit: 120 per minute. Pushes: `message` to every member who can see it; a reply it queues, `run` to that Agent's
   owner.
 
@@ -2257,6 +2351,9 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
                                        // or { "seq": 7, "visible": false } when you cannot see the quoted message;
                                        // absent when not a reply. A quoted notice: kind "text", senderId null
   "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
+  "mentions": [{ "id": "…", "start": 0, "length": 7 }],   // who its mentions mean, as decided when it was sent
+                                       // (Mentions): ranges of "text" in UTF-16 code units, ascending; to every reader;
+                                       // absent when it names nobody (and on messages from before mentions were stored)
   "reasoning": "…",                    // an Agent's reply: the model's reasoning, when it gave any — in its own
                                        // conversation; in a group only when you own the Agent that sent it (absent
                                        // for every other member, so their message is shaped as one without any);
@@ -2526,8 +2623,9 @@ Agent or conversation: its route makes the call itself, `POST /api/agents/draft-
 
 **Trigger** (`runs.ts` `maybeTrigger`). In the transaction that stores the owner's message in the Agent's conversation
 (not a repeated `clientTxn`), under the send's locks: nothing happens when the Agent is paused, deleted or has no model,
-or when its `replyMode` is `mention` and the text has neither its handle (the full one) nor its name part as a whole
-mention (In a group, below: `@jarvis_2` is not `@jarvis`), nor `@` + its current name anywhere (case ignored). A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
+or when its `replyMode` is `mention` and the message's stored mentions (Mentions) do not mean it — picked from the @
+list, or typed as its handle (the full one) or its name part as a whole mention (`@jarvis_2` is not `@jarvis`), or `@` +
+its current name anywhere (case ignored), read once at send. A message that comes while a run of the Agent is active in that conversation is folded into it (Coalescing,
 below). Otherwise a `queued` run is inserted in that conversation covering the message (`covers_seq`), unless the owner
 has started `AGENT_RUNS_PER_MINUTE` (20) replies of their own lane in the last minute (a reply in the Agent's own
 conversation is always the owner's own, the owner its caller): then the run is inserted already `failed`, error
@@ -2539,26 +2637,26 @@ counted one after the other and the limit is exact. The `run` push and (for a qu
 the commit.
 
 **In a group** (`runs.ts` `triggerInGroup`, `triggerFromAgent`; `mentions.ts`). An Agent there replies only when a
-message calls it: `@` + its handle on a token boundary — not preceded or followed by a letter, digit or `_` of
+message's stored mentions (Mentions) mean it: picked from the @ list (the tag shows its name; it means that Agent and no
+other), or typed and read once at send as follows: `@` + its handle on a token boundary — not preceded or followed by a letter, digit or `_` of
 `[A-Za-z0-9_]`, so `@anna` does not call `anna_2` and `mail@anna` calls nobody — case ignored (its name does not call
 it: names are not unique in a group). Its handle in full, `@owner.name` (Handles), always calls it; the name part alone,
 `@name`, calls the one Agent member of the group with that name part — nobody when a person member has that handle or
 that display name (trimmed, case ignored, the whole name: people first — `@anna` is the person anna when she is a member,
 and so is `@Jarvis` when a member is called 「Jarvis」), and nobody when two or more Agent members have it, exactly as a handle nobody there has (no run, no notice). A full handle two live
 Agents would share (only a writer that skipped the owner's account lock could make one) calls nobody too. An Agent's
-message is read the same way (one of two `jarvis` may be itself). The @ picker writes a person as `@` and their display
-name: that is safe only for a display name of one word (made of `A-Za-z0-9_`, as 「Jarvis」). A display name of more than
-one word picked there — 「Jarvis Lee」 written `@Jarvis Lee` — reads as `@jarvis`, and still calls `*.jarvis` where it is
-the only one, until a mention carries its target rather than its text (planned next); the same for a name with a dot
-(「Anna.Lee」 → the full form `anna.lee`). The proactive judgement's "someone was named" reads
-bare names the same way (`namesAgentMember`). A mention is `@`, a run of those characters (3–24 before a dot, 2–24 alone) and at most one `.` with a
+message is read the same way when it is posted (one of two `jarvis` may be itself). A person picked from the @ list is
+stored as that person whatever their name (「Jarvis Lee」, 「Anna.Lee」): the `@Jarvis` inside a picked range is not read
+again, so it calls no Agent. The proactive judgement's "someone was named" is an Agent among the stored entries
+(`namesAnAgent`). A typed mention is `@`, a run of those characters (3–24 before a dot, 2–24 alone) and at most one `.` with a
 name part of 2–24 after it: a `.` not followed by one of them is punctuation (`ask @xiaolin.jarvis.` calls
 `xiaolin.jarvis`), `@a.b.c` is `a.b` and then text, and a part out of those lengths calls nobody. A dot followed by a
 word is part of the mention, not punctuation: `@anna.Thanks` and `cc @jarvis.see above` (no space after the period) are
 the full handles `anna.thanks` and `jarvis.see`, which call nobody — write a space after the period to call `anna`. A handle a person gave
 up calls nobody, in full or under an Agent. At most the first 20 distinct handles of a message count (`xiaolin.jarvis`
-and `jarvis` are two); a file's caption is its text. `replyMode` plays no part. A message that names no handle costs
-nothing, not even a query; one that does, one query over the group's current members (`resolveMentions`).
+and `jarvis` are two); a file's caption is its text; nothing in code is read (Mentions). `replyMode` plays no part. A
+message whose text types no handle costs no query to read; the trigger reads only the stored entries — none: nothing,
+not even a query.
 - *A person's message* (the send's transaction): the group's current Agent members it names, each in id order under its
   `agents` row lock (the group's row is the send's): nothing for one that is paused, deleted or has no model, nor for
   one whose `groupMentions` is `owner` unless its owner wrote the message, nor for one with a block between its owner
@@ -2581,7 +2679,7 @@ nothing, not even a query; one that does, one query over the group's current mem
   nobody called for relays is nobody's (`others`, no caller). A call on an Agent of someone other than the person behind
   it meets that Agent's others' daily budget, that person's caller limit (none without a caller) and the lane's
   replies a minute as a person's does; a call the Agent's owner is behind is their own. The message calls the Agent
-  members it names other than itself whose `groupMentions` is `members` and whose owner has no block, in either direction, with the
+  members its stored entries mean other than itself whose `groupMentions` is `members` and whose owner has no block, in either direction, with the
   posting Agent's owner nor with the person behind the message (none to match when nobody is behind it): a member's
   call relayed through the owner's Agent to an Agent whose owner and the member have a block between them reaches
   nothing — no run, no notice, nothing spent — as the member's own mention would; lifting the block restores it at
@@ -3309,9 +3407,10 @@ commit, reading nothing more. A message that called an Agent — one the trigger
 `rate_limited`, a call over its caller's limit, a spent budget — drops whatever waited in the group and starts nothing:
 whoever was called answers, and nobody unasked. Any other message becomes the group's one waiting message, replacing the
 one before, and the wait (`debounceMs`) starts again, so a person writing several lines gets one judgement, of the latest;
-that includes a message naming a person, and one naming an Agent by `@handle` that the trigger ignored (not in the group,
-paused, deleted or without a model, `groupMentions` `owner`, a block, or folded into its reply under way), which its
-decision then refuses. An Agent's post in the group drops the wait too (the group moved on). A group is never decided
+that includes a message naming a person, one that asked an Agent it could not name (an Agent outside the group, two
+Agents of one name part: `asks_agent`), and one whose stored mentions name an Agent the trigger ignored (paused,
+deleted or without a model, `groupMentions` `owner`, a block, or folded into its reply under way), which its decision
+then refuses. An Agent's post in the group drops the wait too (the group moved on). A group is never decided
 twice at once: a message noted while its decision is in flight waits for that to settle, then for a fresh wait. At most 8
 decisions are in flight, all groups together (`MAX_DECISIONS_AT_ONCE`, a constant: each holds a database connection while
 it reads); a group whose wait ends while 8 are waits its turn, oldest first. No group and no sender may use up the site's
@@ -3331,9 +3430,9 @@ nothing more is judged, and what a decision still in flight decides is dropped (
 
 1. *Read, without locks* (`candidates.ts`). The message must still be one to judge (`judgeable`): the conversation is an
    open group, the message is its latest that is not a notice and a person sent it, Agents were not halted at or after
-   it (`agents_halted_seq`), and its text (a file's caption) names no Agent by `@handle` — by its full handle any Agent,
-   in the group or not; by a bare name part any Agent member of the group with it (two of them included), unless a
-   person member has that handle (`namesAnAgent`).
+   it (`agents_halted_seq`), its stored mentions (Mentions) mean no Agent (`namesAnAgent`), and it asked no Agent it
+   could not name (`asks_agent`, decided at send: the full handle of an Agent elsewhere, a bare name two Agents of the
+   group share); its text is not read again.
    And it has led to no proactive reply yet (no `agent_group_state` row of the group has `surcharge_seq` at or after it).
    The options (`optionsFor`, `mayAnswerUnasked`): the group's current Agent members that joined before the message (an
    Agent answers nothing from before its stay began), with `proactive` on, not paused or deleted, with a model that is
@@ -3383,7 +3482,7 @@ are checked in the order of the table.
 |---|---|
 | No judgement model (`JUDGE` unset) | nothing: no scheduler |
 | The judgement model was asked `perGroupHour` times about the group, or `perSenderHour` about the sender's messages, within the hour | `judge_capped`, once an hour for each group and each sender |
-| The message called an Agent or names one by `@handle`; a message (anyone's, an Agent's included) came after it, a halt, or the group was closed before it was decided; it already led to a proactive reply; no Agent of the group is an option (`proactive` off, paused, deleted, without a model, joined at or after the message, or a block between its owner and the sender); no line of the transcript to show | nothing |
+| The message called an Agent, its stored mentions name one, or it asked one it could not name (`asks_agent`); a message (anyone's, an Agent's included) came after it, a halt, or the group was closed before it was decided; it already led to a proactive reply; no Agent of the group is an option (`proactive` off, paused, deleted, without a model, joined at or after the message, or a block between its owner and the sender); no line of the transcript to show | nothing |
 | Agents were halted at or after the message (`POST …/agents/halt`): no message from before a halt is judged; a person's next message is, as usual | nothing |
 | The site's judgements of the site day have reached `dailyLimit` | `judge_daily_limit`, once per process and site day |
 | The judgement failed: every channel erred, timed out, answered a status other than 200, or a body that is not `{"answers": {…}}` | `judge_failed`, with why |

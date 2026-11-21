@@ -7,6 +7,8 @@
 //   - a code block has 复制, a table scrolls sideways inside the bubble.
 import React, { createElement, memo, useEffect, useRef, useState } from "react";
 import { linkTextShown, safeHref, withoutBidiControls } from "./markdownRules.js";
+import { mentionParts, withoutMarks } from "./mentionMarks.js";
+import { MentionTag } from "./MentionText.jsx";
 import { shownHost } from "./markdownTree.js";
 import "katex/dist/katex.min.css";
 
@@ -16,7 +18,7 @@ import "katex/dist/katex.min.css";
  */
 function Link({ href, text }) {
   const safe = safeHref(href);
-  const cleaned = linkTextShown(text);
+  const cleaned = linkTextShown(withoutMarks(text));
   if (!safe) return cleaned;
   return (
     <span className="md-link" dir="auto">
@@ -70,12 +72,22 @@ function CodeBlock({ children }) {
 const linkText = (node) => (node.children?.length === 1 && typeof node.children[0] === "string" ? node.children[0] : "");
 const isKatexRoot = (node) => node.tag === "span" && (node.props?.className ?? []).some((name) => name === "katex" || name === "katex-display" || name === "katex-error");
 
+/**
+ * A text of the tree: its mentions (between the marks the text was sent with, mentionMarks.js) as tags meaning the id of
+ * their index in `ids`; inside code or maths (`plain`) the marks are only taken out — a mention there is plain text.
+ */
+const texts = (text, plain, ids) =>
+  plain
+    ? [withoutMarks(text)]
+    : mentionParts(text).map((part) => (typeof part === "string" ? part : createElement(MentionTag, { text: part.text, id: ids[part.index] ?? null })));
+
 /** One checked element as React's: the app's parts for links, code blocks and tables; classes joined; a cell's alignment. */
-function toElement(node, katex) {
+function toElement(node, katex, ids, code = false) {
   const inKatex = katex || isKatexRoot(node);
+  const inCode = code || node.tag === "code" || node.tag === "pre";
   const { className, align, ...rest } = node.props ?? {};
   if (!inKatex && node.tag === "a") return createElement(Link, { href: rest.href, text: linkText(node) });
-  const children = (node.children ?? []).map((child) => (typeof child === "string" ? child : toElement(child, inKatex)));
+  const children = (node.children ?? []).flatMap((child) => (typeof child === "string" ? texts(child, inKatex || inCode, ids) : [toElement(child, inKatex, ids, inCode)]));
   if (!inKatex && node.tag === "pre") return createElement(CodeBlock, null, ...children);
   if (!inKatex && node.tag === "table") return createElement(Table, null, ...children);
   const props = { ...rest };
@@ -85,7 +97,10 @@ function toElement(node, katex) {
   return createElement(node.tag, props, ...children);
 }
 
-/** A checked tree (markdownTree.js `validateTree`), shown; made again only when the tree changes. */
-export const RichTree = memo(function RichTree({ tree }) {
-  return createElement("div", { className: "md" }, ...tree.map((node) => (typeof node === "string" ? node : toElement(node, false))));
+/**
+ * A checked tree (markdownTree.js `validateTree`), shown; made again only when the tree changes. `mentionIds`: who each
+ * marked mention means, by its index.
+ */
+export const RichTree = memo(function RichTree({ tree, mentionIds = [] }) {
+  return createElement("div", { className: "md" }, ...tree.flatMap((node) => (typeof node === "string" ? texts(node, false, mentionIds) : [toElement(node, false, mentionIds)])));
 });

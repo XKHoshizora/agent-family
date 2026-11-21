@@ -37,7 +37,7 @@ import {
 import { contextBudget, holdsNewest } from "./runtime/context.ts";
 import { FINAL_LINE } from "./runtime/loop.ts";
 import { postAsAgent } from "./conversation.ts";
-import { resolveMentions } from "./mentions.ts";
+import { namePartCalls } from "./mentions.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import {
@@ -471,10 +471,10 @@ export class DbAgentPort implements AgentPort {
         return { end: KEY_UNREADABLE };
       }
       if (!resolved) return { end: MODEL_GONE };
-      // Whether its name part alone calls it there (mentions.ts): then the system text names both ways it is called. Not
-      // for a reply nobody asked for, whose text says nobody called it.
-      const bare =
-        group && state.lane !== "proactive" && (await resolveMentions(t, run.conversationId, [agent.namePart])).get(agent.namePart) === agent.id ? agent.namePart : null;
+      // Whether its name part alone, typed, calls it there (mentions.ts `namePartCalls`: how a send would read it — no
+      // message is read): then the system text names both ways it is called. Not for a reply nobody asked for, whose text
+      // says nobody called it.
+      const bare = group && state.lane !== "proactive" && (await namePartCalls(t, run.conversationId, agent.namePart, agent.id)) ? agent.namePart : null;
       // The model's learned ratio, read once for the run: the context is planned at it when it is above 1 (`planRatio`),
       // and step 3 corrects by it the input estimate settlement falls back on (never the hold).
       const key = ratioKey(resolved);

@@ -10,6 +10,15 @@ React 19 + Vite. Talks to `app/service` over same-origin `/api` (cookie session)
 2. `npm install` then `npm run dev` here. Vite serves `http://127.0.0.1:5273` (port is fixed, `strictPort`) and proxies
    `/api`, WebSocket included, to the service with the Host and Origin headers unchanged.
 
+## Browsers
+
+The bundle needs **Chrome or Edge 111, Firefox 114, Safari or iOS Safari 16.4** or later: the build's target
+(`vite.config.mjs` `build.target`, stated there; Vite 8's own default today). The hard floor comes from the code: the
+mention address pattern (`src/data/mentions.js`, `ADDRESS_PATTERN`) and the Markdown worker's GFM autolinks use a
+RegExp lookbehind, which Safari and iOS have only from 16.4 (Chrome 62, Firefox 78). In an older browser the main
+bundle does not even parse: the page stays blank. Raising the target is a decision; lowering it needs those patterns
+written without lookbehind first.
+
 ## Test and build
 
 - `npm test` runs ESLint and vitest (`tests/`).
@@ -25,8 +34,11 @@ errors and the XSS probe (`support/fixtures.mjs`).
 
 **Local mode** (default). Global setup builds this client and the service (`npm run build` in both;
 `E2E_SKIP_BUILD=1` reuses the last builds), runs the migrations on the database `af_e2e` (server, role and password of
-`TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced) and empties every table but
-`pgmigrations`, starts the model stub (`support/model-stub.mjs`: a local stand-in for a model service on 127.0.0.1,
+`TEST_DATABASE_URL`, from the environment or `app/service/.env`, with the name replaced; `E2E_DATABASE` names another,
+lower case, ending in `_e2e`, at most 63 bytes, created when it does not exist — with its own `E2E_PORT`, a second run
+beside another; unset, nothing changes) and empties every table but
+`pgmigrations`. **An existing database of that name is migrated and emptied, whatever it holds**: the suffix is the only
+guard, so never point `E2E_DATABASE` at a database you want to keep. The suite then starts the model stub (`support/model-stub.mjs`: a local stand-in for a model service on 127.0.0.1,
 speaking OpenAI Chat Completions and Anthropic Messages, streamed, scripted by the specs) and the judgement stub
 (`support/judge-stub.mjs`: a local stand-in for the judgement model of proactive replies, answering by fixed rules on the
 message judged — 川菜 picks the first Agent, 别插话 asks it to be quiet, anything else picks nobody — and recording what it
@@ -43,7 +55,7 @@ of the runner (127.0.0.1, random port and token). Teardown stops the service and
 crashed run is stopped by the next run. `E2E_SHOTS=1` also saves the acceptance screenshots
 (`docs/acceptance/batch2a/shots/`, 1440×900 and 390×844) of this run's own seeded data. The service log is
 `e2e/test-results/service.log`; failures keep traces and screenshots in `e2e/test-results/`, the HTML report is in
-`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored. `e2e/agents-group.spec.mjs` covers an owner's Agent in a group (add, @-call, one whole reply charged to its owner, what other members never receive), Agents calling each other with 让 Agent 停下 and the chain limit, a failed reply, leaving, removal and deletion, then message times, the two-step provider form, a model's 高级 panel and the paced reveal; with `E2E_SHOTS=1` its screenshots go to `docs/acceptance/batch2c/shots/`. Its chain-limit test restarts the service with `AGENT_CHAIN_LIMIT=3` through the runner's control endpoint (`restartService({…})` in `e2e/support/control.mjs`, and `restartService({})` back to the normal configuration; only the local suite can). `e2e/agents-proactive.spec.mjs` covers proactive replies: an owner turns 主动参与群聊 on in the Agent form, a member's message without @ gets the Agent's reply on both pages, the owner's model line under it ends ` · 主动回复` while the member sees no line and receives no word of it, 别插话 brings the `agent_quieted` notice, and chit-chat gets no reply; no other spec turns the switch on, so in no other spec is the judgement stub ever asked. `e2e/support/db.mjs` is the local suite's direct database helper (refused unless the database is `af_e2e`): `backdateMessage(conversationId, seq, days)` moves a message into the past, for what no person can do in the app.
+`e2e/playwright-report/` (`npx playwright show-report e2e/playwright-report`). All of these are git-ignored. `e2e/agents-group.spec.mjs` covers an owner's Agent in a group (add, @-call, one whole reply charged to its owner, what other members never receive), Agents calling each other with 让 Agent 停下 and the chain limit, a failed reply, leaving, removal and deletion, then message times, the two-step provider form, a model's 高级 panel and the paced reveal; with `E2E_SHOTS=1` its screenshots go to `docs/acceptance/batch2c/shots/`. Its chain-limit test restarts the service with `AGENT_CHAIN_LIMIT=3` through the runner's control endpoint (`restartService({…})` in `e2e/support/control.mjs`, and `restartService({})` back to the normal configuration; only the local suite can). `e2e/agents-proactive.spec.mjs` covers proactive replies: an owner turns 主动参与群聊 on in the Agent form, a member's message without @ gets the Agent's reply on both pages, the owner's model line under it ends ` · 主动回复` while the member sees no line and receives no word of it, 别插话 brings the `agent_quieted` notice, and chit-chat gets no reply; no other spec turns the switch on, so in no other spec is the judgement stub ever asked. `e2e/mentions.spec.mjs` covers mentions picked from the @ list in Chromium: each tag the composer draws lies on its own characters within 1.5 px (one line, wrapped, split across a wrap, after CJK, Latin and emoji, scrolled in a tall box, at 375 px and at device scale factors 1.25 and 1.5), Backspace, a click and a script-placed caret against a tag, the browser's own undo and redo, an IME composition (Chrome's, through the DevTools protocol) next to a tag and inside one (also with 发送 tapped before it is committed), what is stored and called when sent and what both browsers show, a person named 「Jarvis Lee」, and a URL with `/@name` in an Agent's reply; with `E2E_SHOTS=1` its screenshots (`mentions-*.png`) go to `docs/acceptance/batch2-tools/shots/`. `e2e/support/db.mjs` is the local suite's direct database helper (refused unless the database is `af_e2e`): `backdateMessage(conversationId, seq, days)` moves a message into the past, for what no person can do in the app.
 
 **Remote mode.** `E2E_BASE_URL=https://… E2E_INVITE_CMD="…" E2E_INBOX_CMD="… {email}" npm run e2e` starts nothing
 and talks to that origin. The invite code is the last line of `E2E_INVITE_CMD`'s output that is a 20-character code;

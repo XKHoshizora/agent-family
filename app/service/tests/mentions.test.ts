@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
-import { mentionedHandles } from "../src/agents/mentions.ts";
+import { mentionedHandles, mentionsAtSend, mentionTokens, typedReading } from "../src/agents/mentions.ts";
+import { MESSAGE_TEXT_MAX } from "../src/messages/send.ts";
+
 import { namesAnAgent } from "../src/agents/proactive/candidates.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { triggerFromAgent } from "../src/agents/runs.ts";
@@ -9,6 +11,9 @@ import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
+
+/** The handles a text names, as the reading at send looks them up (its tokens, then their distinct handles). */
+const handlesIn = (text: string): string[] => mentionedHandles(mentionTokens(text));
 
 /**
  * Family names in mentions (Task N): `@owner.name` always names that Agent; a bare `@name` names the one Agent member of
@@ -57,7 +62,7 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
     ["@anna.Thanks", ["anna.thanks"]],
     ["cc @jarvis.see above", ["jarvis.see"]],
   ])("%j → %j", (text, expected) => {
-    expect(mentionedHandles(text)).toEqual(expected);
+    expect(handlesIn(text)).toEqual(expected);
   });
 
   it("stays linear on dotted runs: 8 000 characters of @a.a.a…, @aaa.aaa.… and the like take about four times what 2 000 take", () => {
@@ -66,7 +71,7 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
       let best = Number.POSITIVE_INFINITY;
       for (let i = 0; i < 5; i++) {
         const started = performance.now();
-        for (let j = 0; j < 10; j++) mentionedHandles(text);
+        for (let j = 0; j < 10; j++) handlesIn(text);
         best = Math.min(best, performance.now() - started);
       }
       return best;
@@ -81,11 +86,68 @@ describe("mentionedHandles: the full form `owner.name` and the bare `name`", () 
     for (const [make, expected] of cases) {
       const [small, large] = [make(2000), make(8000)];
       expect(large.length).toBeGreaterThanOrEqual(7900);
-      expect(mentionedHandles(large)).toEqual(expected);
+      expect(handlesIn(large)).toEqual(expected);
       // Linear: four times the text, about four times the time (a quadratic parse would take sixteen); a few ms of grace.
       expect(fastest(large)).toBeLessThan(8 * fastest(small) + 5);
     }
   });
+});
+
+/** The time of one call of `work` over a burst: `work` repeated until at least 30 ms have passed (a fast call is measured too). */
+function burst(work: () => void): number {
+  let calls = 0;
+  const started = performance.now();
+  let spent = 0;
+  do {
+    work();
+    calls += 1;
+    spent = performance.now() - started;
+  } while (spent < 30);
+  return spent / calls;
+}
+
+/**
+ * How many times longer one call of `large` takes than one of `small` — a ratio, not a number of milliseconds, decides a
+ * linearity test: after a warm-up (both compiled), the median of five ratios, the two of each measured one right after
+ * the other, each as the shortest of three bursts (a busy machine only ever adds time: a thread put aside for a while).
+ */
+function timeRatio(large: () => void, small: () => void): number {
+  burst(large);
+  burst(small);
+  const perCall = (work: () => void) => Math.min(burst(work), burst(work), burst(work));
+  const ratios: number[] = [];
+  for (let s = 0; s < 5; s++) ratios.push(perCall(large) / perCall(small));
+  return ratios.sort((a, b) => a - b)[2]!;
+}
+
+describe("the reading at send is linear in the text, at the longest a message may be (fix round 2, I-4; tidy round, m-1)", () => {
+  it("code, addresses and tokens of 16 000 code units (MESSAGE_TEXT_MAX code points, each up to two units) take about four times what 4 000 take, whatever the text holds", () => {
+    expect(MESSAGE_TEXT_MAX).toBe(8000);
+    // The reading works on UTF-16 code units: a text of MESSAGE_TEXT_MAX code points holds up to twice as many.
+    const longest = MESSAGE_TEXT_MAX * 2;
+    const cases: Array<[string, (n: number) => string]> = [
+      ["@ and a run of letters", (n) => `@${"a".repeat(n - 1)}`],
+      ["a run of letters, dots and dashes", (n) => `@x ${"a.b-c+".repeat(n / 6)}`.slice(0, n)],
+      ["www. again and again", (n) => `@x ${"www.".repeat(n / 4)}`.slice(0, n)],
+      ["schemes without //", (n) => `@x ${"http:".repeat(n / 5)}`.slice(0, n)],
+      ["link targets", (n) => `@x ${"](".repeat(n / 2)}`.slice(0, n)],
+      ["backticks", (n) => `@x ${"`a``".repeat(n / 4)}`.slice(0, n)],
+      ["mentions after slashes", (n) => "/@anna ".repeat(n / 7)],
+      ["URLs between spaces", (n) => `@x ${"http://x/@y ".repeat(n / 12)}`.slice(0, n)],
+      // Short lines of text between fences: many paragraphs, no blank line between them (m-1).
+      ["fences between short lines", (n) => `@x\n${"```\n```\na\n".repeat(n / 10)}`.slice(0, n)],
+      ["list fences between short lines", (n) => `@x\n${"- ```\n  ```\na\n".repeat(n / 14)}`.slice(0, n)],
+      ["blank lines between short paragraphs", (n) => `@x\n${"a `b\n\n".repeat(n / 6)}`.slice(0, n)],
+    ];
+    for (const [name, make] of cases) {
+      const [small, large] = [make(longest / 4), make(longest)];
+      expect(large.length, name).toBeGreaterThanOrEqual(longest - 14);
+      // Linear: four times the text, about four times the time (a quadratic reading takes sixteen).
+      const ratio = timeRatio(() => typedReading(large), () => typedReading(small));
+      expect(ratio, `${name}: 4× the text took ${ratio.toFixed(1)}× the time`).toBeLessThan(8);
+    }
+    // (Eleven shapes, each about a second of measuring: more than the usual limit of a test.)
+  }, 120_000);
 });
 
 /** Puts principal `id` into conversation `conv` from its current seq on. */
@@ -116,6 +178,10 @@ const covered = async (agentId: string, conv: string): Promise<number[]> =>
   );
 
 const allRuns = async () => Number((await db.query("select count(*) n from agent_runs")).rows[0].n);
+/** Who the message at `seq` names, as stored when it was sent (Task M). */
+const storedMentions = async (conv: string, seq: number) =>
+  (await db.query<{ mentions: Array<{ id: string; start: number; length: number }> | null }>("select mentions from messages where conversation_id = $1 and seq = $2", [conv, seq])).rows[0]!
+    .mentions;
 const notices = async (conv: string) => Number((await db.query("select count(*) n from messages where conversation_id = $1 and kind = 'system'", [conv])).rows[0].n);
 const settleAll = () => db.query("update agent_runs set status = 'done', finished_at = now() where status in ('queued', 'running')");
 
@@ -123,7 +189,7 @@ const settleAll = () => db.query("update agent_runs set status = 'done', finishe
 const agentSays = (agentId: string, conv: string, text: string) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
-    const message = await insertMessage(t, conv, agentId, "text", { text }, null);
+    const message = await insertMessage(t, conv, agentId, "text", { text }, null, await mentionsAtSend(t, { id: conv, type: "group" }, text));
     return triggerFromAgent(t, conv, message, poster, null, app.deps.config, null);
   });
 
@@ -279,21 +345,21 @@ describe("a person member's display name is a person first (fix round 1, I2)", (
     await join(w.g, tony.id);
     const jarvis = await agentOf(w.xiaolin, "jarvis", w.g);
     const runs = await allRuns();
-    await say(w.anna, w.g, "@Jarvis 你好");
+    const named = await say(w.anna, w.g, "@Jarvis 你好");
     expect(await allRuns()).toBe(runs);
     expect(Number((await db.query("select count(*) n from usage_records")).rows[0].n)).toBe(0);
-    // Nor does it name an Agent for the proactive judgement: it named the person.
-    expect(await namesAnAgent(db, w.g, "@Jarvis 你好")).toBe(false);
+    // Nor does it name an Agent for the proactive judgement: it named the person (as stored when it was sent, Task M).
+    expect(await namesAnAgent(db, await storedMentions(w.g, named))).toBe(false);
     // The full form is never a person's.
     const one = await say(w.anna, w.g, "@xiaolin.jarvis 你好");
     expect(await covered(jarvis.id, w.g)).toEqual([one]);
-    expect(await namesAnAgent(db, w.g, "@xiaolin.jarvis")).toBe(true);
+    expect(await namesAnAgent(db, await storedMentions(w.g, one))).toBe(true);
     await settleAll();
     const elsewhere = await group(app, w.xiaolin, "elsewhere", [w.bobby, w.anna]);
     await join(elsewhere, jarvis.id);
     const two = await say(w.anna, elsewhere, "@jarvis 你好");
     expect(await covered(jarvis.id, elsewhere)).toEqual([two]);
-    expect(await namesAnAgent(db, elsewhere, "@jarvis 你好")).toBe(true);
+    expect(await namesAnAgent(db, await storedMentions(elsewhere, two))).toBe(true);
   });
 });
 

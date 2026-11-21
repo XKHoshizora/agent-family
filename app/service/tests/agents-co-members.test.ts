@@ -50,6 +50,9 @@ const HIDDEN = {
 const HIDDEN_KEYS = [
   // When a person may change their handle again: `GET /api/me` alone (family names).
   "handleChangeAvailableAt",
+  // Whether a message asked an Agent it could not name (Task M fix round 1): read by the proactive judgement only.
+  "asksAgent",
+  "asks_agent",
   "persona",
   "personaVersion",
   "model",

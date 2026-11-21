@@ -1,0 +1,24 @@
+{
+  "about": "The address rule of mentions, one table for the service (app/service/src/agents/mentions.ts: ADDRESS_PATTERN, addressRanges, inAddress) and the web (app/web/src/data/mentions.js: the same), both of whose tests assert every case. 'pattern' is the pattern's source, character for character. Each case: a text; 'taken', the picked tags' ranges [start, end) in UTF-16 code units, whose own text is never read as an address (each character stands in as '_'); 'addresses', the address ranges expected; 'checks', [start, length, in an address] for a mention there: right after '/', or overlapping an address.",
+  "pattern": "(?:(?<![A-Za-z0-9+.-])[A-Za-z][A-Za-z0-9+.-]*:\\/\\/|www\\.)[^\\s<>]*|\\]\\([^)\\s]*",
+  "cases": [
+    {"note":"a URL holds the @name in it","text":"看 https://x.example/@anna 好","taken":[],"addresses":[[2,25]],"checks":[[20,5,true]]},
+    {"note":"no scheme: no URL, but an @ right after / is an address","text":"见 x.example/@anna 吧","taken":[],"addresses":[],"checks":[[12,5,true]]},
+    {"note":"a link's target is an address, what follows it is not","text":"[链接](https://x.example/u/@anna) 和 @bob","taken":[],"addresses":[[3,30]],"checks":[[25,5,true],[34,4,false]]},
+    {"note":"a link's text is no address","text":"[@anna](https://x.example/p) 看","taken":[],"addresses":[[6,27]],"checks":[[1,5,false]]},
+    {"note":"a scheme glued to a digit is no URL (GFM does not link it either)","text":"1http://x?n=@anna","taken":[],"addresses":[],"checks":[[12,5,false]]},
+    {"note":"www. runs to the next white space, across Chinese punctuation","text":"www.x.com/p，@贾维斯 帮我看","taken":[],"addresses":[[0,16]],"checks":[[12,4,true]]},
+    {"note":"a URL runs to the next white space, across Chinese punctuation","text":"https://x.com/a，@贾维斯 帮我看","taken":[],"addresses":[[0,20]],"checks":[[16,4,true]]},
+    {"note":"< and > end a URL","text":"a <https://x.example/@anna> 和 @bob","taken":[],"addresses":[[3,26]],"checks":[[21,5,true],[30,4,false]]},
+    {"note":"an e-mail address is no URL","text":"写信到 anna@example.com 吧","taken":[],"addresses":[],"checks":[[8,8,false]]},
+    {"note":"no // after the scheme: no URL; the / rule still holds","text":"ab.cd:/@x 和 http:@y","taken":[],"addresses":[],"checks":[[7,2,true],[17,2,false]]},
+    {"note":"a picked tag's own text is never read as an address (a display name with www.)","text":"@www.anna 你好","taken":[[0,9]],"addresses":[],"checks":[[0,9,false]]},
+    {"note":"the same text typed is an address","text":"www.anna 你好","taken":[],"addresses":[[0,8]],"checks":[[0,8,true]]},
+    {"note":"a picked display name with :// is no address","text":"@a://b 好","taken":[[0,6]],"addresses":[],"checks":[[0,6,false]]},
+    {"note":"a URL running into a picked tag holds it: a real address position","text":"https://x.com?n=@anna","taken":[[16,21]],"addresses":[[0,21]],"checks":[[16,5,true]]},
+    {"note":"www. right before a picked tag holds it","text":"www.@anna 好","taken":[[4,9]],"addresses":[[0,9]],"checks":[[4,5,true]]},
+    {"note":"a picked tag right after / is in an address","text":"x.example/@anna","taken":[[10,15]],"addresses":[],"checks":[[10,5,true]]},
+    {"note":"a picked tag before :// is no scheme","text":"@anna://x","taken":[[0,5]],"addresses":[],"checks":[[0,5,false]]},
+    {"note":"after a / (the second name of @anna/@bob)","text":"@anna/@bob 和 A/@B","taken":[[0,5]],"addresses":[],"checks":[[0,5,false],[6,4,true],[15,2,true]]}
+  ]
+}

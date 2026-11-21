@@ -129,5 +129,6 @@ export const APP_CLASSES = new Set(
   model-brand model-trigger model-name model-chevron model-pop model-scrim model-search model-list model-group-label model-option
   model-note model-check model-reason model-marks model-mark model-mark-free model-mark-paid model-empty model-foot model-scope side-model
   select-trigger select-label select-pop select-list select-option
-  handle-input handle-prefix`.split(/\s+/),
+  handle-input handle-prefix
+  composer-field composer-field-off composer-mirror mention mention-agent mention-chip`.split(/\s+/),
 );

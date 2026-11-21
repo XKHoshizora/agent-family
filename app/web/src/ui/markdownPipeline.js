@@ -436,13 +436,20 @@ function linkText(node, href) {
 }
 
 /**
+ * An address without the mention marks of mentionMarks.js (U+FDD0–U+FDEF), as they are or percent-encoded (EF B7 90–AF
+ * in UTF-8): none is ever put in an address (fix round 1, I-3), and one that came there all the same must not change
+ * where a link goes.
+ */
+const withoutMarksIn = (href) => (typeof href === "string" ? href.replace(/[\uFDD0-\uFDEF]|%EF%B7%(?:9[0-9A-F]|A[0-9A-F])/gi, "") : href);
+
+/**
  * A link with a safe href and its content as one plain text (`linkText`), or — without a safe href, inside another
  * link, for a footnote's in-page links — its content alone. The text's own title is dropped: the main thread shows the
  * real address as the tooltip and the real host after the text.
  */
 function link(node, within) {
   if (node.properties?.dataFootnoteBackref !== undefined) return [];
-  const href = within.link ? null : safeHref(node.properties?.href);
+  const href = within.link ? null : safeHref(withoutMarksIn(node.properties?.href));
   if (!href) return cleanChildren(node.children, { ...within, link: true });
   return [element("a", { href }, [linkText(node, href)])];
 }

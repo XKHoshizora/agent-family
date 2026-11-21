@@ -71,6 +71,11 @@ export function initial() {
     pending: {},
     /** conversation id → composer text not sent yet. */
     drafts: {},
+    /**
+     * conversation id → a refused message's text and mentions to put back in its composer (`{n, text, mentions}`,
+     * `refillComposer`), until the composer takes it (`takeRefill`).
+     */
+    refills: {},
     /** The last /api/social answer. */
     social: null,
     /** conversation id → how many times I left it (see `stayOf`). */
@@ -691,12 +696,12 @@ export function positionsOf(state, ids) {
 // ───────── optimistic sends, keyed by clientTxn
 
 /** A new unsent message, or a retry of one (it keeps its clientTxn, time and place). */
-export function markSending(state, { clientTxn, conversationId, text = "", replyToSeq = null, attachment = null, at }) {
+export function markSending(state, { clientTxn, conversationId, text = "", replyToSeq = null, attachment = null, mentions = [], at }) {
   const conv = state.conversations[conversationId];
   const old = state.pending[clientTxn];
   const entry = old
     ? { ...old, status: "sending", error: null }
-    : { clientTxn, conversationId, text, replyToSeq, attachment, at, afterSeq: conv ? conv.position : 0, status: "sending", error: null };
+    : { clientTxn, conversationId, text, replyToSeq, attachment, mentions, at, afterSeq: conv ? conv.position : 0, status: "sending", error: null };
   return { ...state, pending: { ...state.pending, [clientTxn]: entry } };
 }
 
@@ -764,6 +769,26 @@ export function discardPending(state, clientTxn) {
   return clientTxn in state.pending ? { ...state, pending: without(state.pending, clientTxn) } : state;
 }
 
+/**
+ * A failed text message goes back to its composer: its text and mentions are put there (`refills`, which the composer
+ * takes, Composer.jsx) and the unsent entry goes. Fix round 1, I-2: a message the service refused for a stale mention
+ * is never sent again as it is, nor without its mentions.
+ */
+export function refillComposer(state, clientTxn) {
+  const p = state.pending[clientTxn];
+  if (!p || p.status !== "failed" || p.file || p.attachment) return state;
+  const n = (state.refills?.[p.conversationId]?.n ?? 0) + 1;
+  return {
+    ...discardPending(state, clientTxn),
+    refills: { ...(state.refills ?? {}), [p.conversationId]: { n, text: p.text ?? "", mentions: Array.isArray(p.mentions) ? p.mentions : [] } },
+  };
+}
+
+/** The composer of `conversationId` took what was put back for it (`refillComposer`). */
+export function takeRefill(state, conversationId) {
+  return state.refills?.[conversationId] ? { ...state, refills: without(state.refills, conversationId) } : state;
+}
+
 /** The service's verdict on sending here, e.g. from a `cannot_send` refusal. */
 export function setCanSend(state, conversationId, canSend) {
   const conv = state.conversations[conversationId];
@@ -822,9 +847,14 @@ export function setPeerRead(state, conversationId, seq) {
   return putConversation(state, { ...conv, peerReadSeq: seq });
 }
 
-export function setDraft(state, conversationId, text) {
-  if ((state.drafts[conversationId] ?? "") === text) return state;
-  return { ...state, drafts: text ? { ...state.drafts, [conversationId]: text } : without(state.drafts, conversationId) };
+/**
+ * A conversation's draft: its text, or — while it holds mentions picked from the @ list — `{text, mentions}` (the
+ * mentions' ranges in that text, data/mentions.js), so a draft keeps its tags. Nothing for an empty draft.
+ */
+export function setDraft(state, conversationId, text, mentions = []) {
+  const draft = Array.isArray(mentions) && mentions.length > 0 && text ? { text, mentions: mentions.map(({ id, start, length }) => ({ id, start, length })) } : text;
+  if (JSON.stringify(state.drafts[conversationId] ?? "") === JSON.stringify(draft)) return state;
+  return { ...state, drafts: draft ? { ...state.drafts, [conversationId]: draft } : without(state.drafts, conversationId) };
 }
 
 /**

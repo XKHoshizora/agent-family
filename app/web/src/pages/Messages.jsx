@@ -6,6 +6,7 @@ import { formatSize, namesAgent, replyPoints } from "../data/viewmodel.js";
 import { useShowReplyPoints } from "../data/prefs.js";
 import { failureText, retryHopeless } from "../data/uploadErrors.js";
 import { Avatar, Btn, Tag } from "../ui/primitives.jsx";
+import { MentionText } from "../ui/MentionText.jsx";
 import { LabLogo, labOfModel } from "../ui/LabLogo.jsx";
 import { AgentModelSwitch, EVERYWHERE_NOTE, levelLabel } from "./ModelPicker.jsx";
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
@@ -26,13 +27,13 @@ function Quote({ quote }) {
   );
 }
 
-/** What a file message says besides the file: the caption, and the quote when it replies to something. */
+/** What a file message says besides the file: the caption (its mentions as tags), and the quote when it replies to something. */
 function Caption({ msg }) {
   if (!msg.caption && !msg.quote) return null;
   return (
     <div className="bubble">
       <Quote quote={msg.quote} />
-      {msg.caption}
+      <MentionText text={msg.caption} mentions={msg.mentions} />
     </div>
   );
 }
@@ -95,10 +96,13 @@ function Body({ msg, agent }) {
   return (
     <div className="bubble">
       <Quote quote={msg.quote} />
-      {agent ? <AgentText text={msg.text} id={msg.id} /> : msg.text}
+      {agent ? <AgentText text={msg.text} id={msg.id} mentions={msg.mentions} /> : <MentionText text={msg.text} mentions={msg.mentions} />}
     </div>
   );
 }
+
+/** A text the service refused because one of its picked mentions is no longer here (`bad_mentions`): 改一下 puts it back. */
+export const STALE_MENTION_TEXT = "有一个 @ 的对象已经不在这里了，改一下再发。";
 
 /** How the line under a reply says the thinking level its run was sent: the Agent form's words. */
 const levelWords = (level) => (level === "none" ? "不思考" : `思考：${levelLabel(level)}`);
@@ -163,11 +167,11 @@ export function MessageItem({ msg, conv, onReply, onJump, flash = false }) {
   // Read state in direct chats and in an Agent's (by its marker); "sending" is shown wherever it happens.
   const showReceipt = mine && (conv.type === "human" || conv.type === "agent");
   // Why my message to my own Agent may get no reply (shown after 已发送, nothing else changes): it is paused, or it
-  // answers only when named and this message did not name it.
+  // answers only when named and this message did not name it (its stored mentions, as the service decided at send).
   const ownAgent = mine && conv.type === "agent" ? state.agents[conv.agentId] : null;
   const sentNote = ownAgent?.paused
     ? " · 它暂停中"
-    : ownAgent?.replyMode === "mention" && !namesAgent(msg.kind === "text" ? msg.text : msg.caption, ownAgent)
+    : ownAgent?.replyMode === "mention" && !namesAgent(msg, conv.agentId)
       ? " · 没点名，它不会回复"
       : "";
   const cancelUpload = () => actions.cancelUpload(msg.clientTxn);
@@ -208,7 +212,15 @@ export function MessageItem({ msg, conv, onReply, onJump, flash = false }) {
                 <CircleAlert size={14} aria-hidden="true" /> 发送失败，未发布
               </span>
               {msg.kind === "file" && <span className="muted">{failureText(msg.error)}</span>}
-              {!(msg.kind === "file" && retryHopeless(msg.error)) && (
+              {msg.error?.code === "bad_mentions" && (
+                <>
+                  <span className="muted">{STALE_MENTION_TEXT}</span>
+                  <Btn small onClick={() => actions.reviseFailed(msg.clientTxn)}>
+                    改一下
+                  </Btn>
+                </>
+              )}
+              {!(msg.kind === "file" && retryHopeless(msg.error)) && msg.error?.code !== "bad_mentions" && (
                 <Btn small onClick={retry}>
                   <RotateCw size={14} aria-hidden="true" /> 重试
                 </Btn>

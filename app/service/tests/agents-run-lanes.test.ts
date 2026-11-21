@@ -5,6 +5,7 @@ import { postAsAgent } from "../src/agents/conversation.ts";
 import { NOTHING, type RunTicket } from "../src/agents/runtime/port.ts";
 import { behindAgentMessage, behindMessageSql, triggerFromAgent, type Caller } from "../src/agents/runs.ts";
 import { lockAgent } from "../src/agents/store.ts";
+import { mentionsAtSend } from "../src/agents/mentions.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
@@ -77,7 +78,7 @@ const say = async (who: Actor, conv: string, text: string, on: FastifyInstance =
 const agentSays = (agentId: string, conv: string, text: string, on: FastifyInstance = app) =>
   db.tx(async (t) => {
     const poster = await lockAgent(t, agentId, conv);
-    const message = await insertMessage(t, conv, agentId, "text", { text }, null);
+    const message = await insertMessage(t, conv, agentId, "text", { text }, null, await mentionsAtSend(t, { id: conv, type: "group" }, text));
     // Posted by no run: whose question it carries is not known (null, the safe side; Task 10b).
     return { message, ...(await triggerFromAgent(t, conv, message, poster, null, on.deps.config, null)) };
   });
