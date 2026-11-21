@@ -38,6 +38,7 @@ describe("previewOfMarkdown", () => {
     ["a number that is not a list", "2024.5 是版本", "2024.5 是版本"],
     ["a reply's citations are no part of its preview", "饺子馆在河边〔m1〕，菜单见〔f2〕。〔m12〕", "饺子馆在河边，菜单见。"],
     ["a citation in code stays code", "```\nx〔m1〕\n```", "x〔m1〕"],
+    ["a citation however written, or built around another, is none of it either (the service's rule)", "见〔 M2 〕和〔m〔m1〕1〕了", "见和了"],
   ])("%s", (_label, text, preview) => {
     expect(previewOfMarkdown(text)).toBe(preview);
   });
@@ -67,6 +68,8 @@ describe("previewOfMarkdown", () => {
   });
 
   it("imports nothing: no Markdown library reaches the main thread through it", () => {
-    expect(readFileSync("src/ui/markdownPreview.js", "utf8")).not.toMatch(/^\s*import\s[^;]*from\s+["'](?!\.\/markdownRules\.js)/m);
+    expect(readFileSync("src/ui/markdownPreview.js", "utf8")).not.toMatch(/^\s*import\s[^;]*from\s+["'](?!\.\/(?:markdownRules|citations)\.js)/m);
+    // (ui/citations.js, the one strip of a reply's citations, imports nothing at all.)
+    expect(readFileSync("src/ui/citations.js", "utf8")).not.toMatch(/^\s*import\s/m);
   });
 });

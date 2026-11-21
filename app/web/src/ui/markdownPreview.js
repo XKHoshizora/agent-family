@@ -3,6 +3,7 @@
 // PREVIEW_SOURCE_CHARS characters of the text, line by line, so its cost has a fixed ceiling whatever the text is.
 // What it cannot read as a marker it leaves as written; the message itself is rendered properly where it is opened.
 import { withoutBidiControls } from "./markdownRules.js";
+import { withoutCitations } from "./citations.js";
 
 /** How much of the text is read, and the most the preview is (the list cuts the line to its width anyway). */
 export const PREVIEW_SOURCE_CHARS = 600;
@@ -25,8 +26,6 @@ const ANGLE = /<(https?:\/\/[^<>\s]*)>/g;
 const EMPHASIS = /\*+|_+|~{2,}/g;
 const CODE_AND_MATHS = /`+|\${2}/g;
 const WORD = /[A-Za-z0-9]/;
-/** A reply's citation (`〔m3〕`, `〔f2〕`, as the service keeps it in the text): a link in the message, nothing in a preview. */
-const CITATION = /〔[mf][1-9][0-9]{0,5}〕/g;
 const BLANK = /\s/;
 
 /** One line outside code, without its markers. */
@@ -36,7 +35,9 @@ function withoutMarkers(line) {
   for (let i = 0; i < 4; i += 1) text = text.replace(QUOTE, "").replace(LIST, "");
   if (RULE.test(text) || DEFINITION.test(text)) return "";
   text = text.replace(HEADING, "").replace(HEADING_END, "");
-  text = text.replace(LINK, "$1").replace(REFERENCE, "$1").replace(ANGLE, "$1").replace(CODE_AND_MATHS, "").replace(CITATION, "");
+  text = text.replace(LINK, "$1").replace(REFERENCE, "$1").replace(ANGLE, "$1").replace(CODE_AND_MATHS, "");
+  // A reply's citations (`〔m3〕`, `〔f2〕`) are links in the message and nothing in its preview (ui/citations.js).
+  text = withoutCitations(text);
   // Emphasis characters go, except where they are not emphasis: inside a word (`get_user_name`, `2*3`) or alone
   // between spaces (`a * b`).
   text = text.replace(EMPHASIS, (run, at) => {
