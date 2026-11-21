@@ -4,6 +4,7 @@ import { runCatchUp } from "../src/memory/catchup.ts";
 import type { PipelineDeps } from "../src/memory/pipeline.ts";
 import type { Judge, Question } from "../src/judge/client.ts";
 import { settled } from "../src/memory/stats.ts";
+import { insertMessage } from "../src/messages/model.ts";
 import { api, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
@@ -162,6 +163,23 @@ describe("也回顾一下 in a group: what members said while memory was off", (
     await switched(v, { memory: true, catchUp: true });
     expect(await flagRows(v.agent.id, "hearsay")).toEqual(old.slice(2));
     expect(scripted.calls.map((c) => c.state).join("\n")).not.toContain("小李的第1件旧事");
+  });
+
+  it("an acknowledgement is no line of a catch-up: it uses up none of MEMORY.catchUpLines, nor of a window (final review m-5)", async () => {
+    app.deps.config.memory.catchUpLines = 3;
+    app.deps.config.proactive.transcriptMessages = 2;
+    const w = await world("cu3c");
+    await switched(w, { memory: false });
+    const off: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      off.push(await say(w.mia, w.g, `小李的第${i}件事`));
+      // An Agent's acknowledgement after each: nothing to remember, and no line to count.
+      await db.tx((t) => insertMessage(t, w.g, w.agent.id, "text", { text: `我查一下${i}`, ack: true } as never, `ack:${crypto.randomUUID()}`));
+    }
+    await switched(w, { memory: true, catchUp: true });
+    expect(await flagRows(w.agent.id, "hearsay")).toEqual(off);
+    // Two windows of two lines (the people's), not three of two with acknowledgements among them.
+    expect(catchUpCalls()).toHaveLength(2);
   });
 
   it("no line from before the switch-off, nor from before the Agent joined, is ever shown to the judgement", async () => {

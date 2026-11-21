@@ -1010,7 +1010,8 @@ stores one catch-up per group the Agent is in (`memory_catchups`): the lines aft
 before it joined) up to the group's latest at the switch. A job runs each, after the switch's commit (and again after a restart,
 `resume`): the group's own judgement (`requestFor`, `askJudgement`) asked this Agent's questions alone — whether someone said something
 lasting about the owner, whether the owner did — over those lines, oldest first, a window (`PROACTIVE.transcriptMessages`) at a time,
-shown nothing from before the switch-off or the join, with no pick and no other owner's question; the group's `judged_seq` and every
+shown nothing from before the switch-off or the join, with no pick and no other owner's question (a line is a text or file message;
+an Agent's acknowledgement is none — nothing to remember: it is not counted toward the bounds below, nor shown in a window); the group's `judged_seq` and every
 other Agent's state stay as they were. What it flags goes the way of any flag: the owner's own remarks reviewed, the hearsay call (with
 nothing at or below the Agent's heard position as context), its entries in 听说的, charged to the owner's memory allowance. Its bounds:
 the most recent `MEMORY.catchUpLines` (200) lines of each group's off period, none older than `MEMORY.catchUpDays` (30) days; older lines

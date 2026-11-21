@@ -4,6 +4,7 @@ import { askJudgement, flagged, mayListen } from "../agents/proactive/decide.ts"
 import { listenersFor, writeFlags, type Listener, type MemoryFlag } from "../agents/proactive/listeners.ts";
 import { lockConversationKeys } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
+import { notAcknowledgement } from "../messages/model.ts";
 import { noCallCanStart } from "./call.ts";
 import { reviewableAgent, type PipelineDeps } from "./pipeline.ts";
 import { count } from "./stats.ts";
@@ -79,8 +80,11 @@ async function advance(q: Queryable, job: CatchUpJob, row: Row, was: number, nex
   return rowCount === 1;
 }
 
-/** The lines a catch-up may judge: what a judgement is shown (text and files). */
-const LINES = "conversation_id = $1 and kind in ('text', 'file')";
+/**
+ * The lines a catch-up may judge: what a judgement is shown (text and files) — but an Agent's acknowledgement, which is nothing to
+ * remember (`notAcknowledgement`, as a review and the summary read): it takes no place in `MEMORY.catchUpLines` nor in a window.
+ */
+const LINES = `conversation_id = $1 and kind in ('text', 'file') and ${notAcknowledgement("messages")}`;
 
 /**
  * The first line the catch-up may look at, its bounds applied to the range `(from, to]`: after the newest line older than `days` days,

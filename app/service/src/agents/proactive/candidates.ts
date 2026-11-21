@@ -2,7 +2,7 @@ import type { Config, ProactiveConfig } from "../../config.ts";
 import type { Queryable } from "../../db.ts";
 import { MAX_CHOICE_OPTIONS, type Question } from "../../judge/client.ts";
 import { modelsUsable } from "../../models/resolve.ts";
-import type { Mention } from "../../messages/model.ts";
+import { notAcknowledgement, type Mention } from "../../messages/model.ts";
 import { handleOf } from "../../principals/store.ts";
 import { blockedEitherWay } from "../../social/relations.ts";
 import { agentModelOf } from "../store.ts";
@@ -194,7 +194,8 @@ export interface JudgeRequest {
  * one) and whether a new message by the owner says something lasting about themselves (`{key}o`: asked only when the
  * owner sent one and an Agent of theirs reviews it, `reviewerId`).
  * `window` (a catch-up, memory/catchup.ts): nothing at or before `after` is shown, and what is new is what came after `newAfter`, not
- * what the group's judgement has judged — the group's position is neither read nor moved.
+ * what the group's judgement has judged — the group's position is neither read nor moved; and an Agent's acknowledgement is no line
+ * of it (`notAcknowledgement`: the catch-up's lines, memory/catchup.ts `LINES`, are counted without them, so its window shows them all).
  * Null when there is no line to show (nothing is asked about descriptions alone) or nothing to ask.
  */
 export async function requestFor(
@@ -212,10 +213,10 @@ export async function requestFor(
     `select m.seq::text as seq, m.sender_id, p.kind as sender_kind, p.display_name as name, ${handleOf("p")} as handle, m.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' ->> 'name' as file
        from messages m join principals p on p.id = m.sender_id
-      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind in ('text', 'file')
+      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind in ('text', 'file') and (not $5::boolean or ${notAcknowledgement("m")})
       order by m.seq desc
       limit $4`,
-    [conversationId, after, seq, P.transcriptMessages],
+    [conversationId, after, seq, P.transcriptMessages, window !== undefined],
   );
   if (rows.length === 0) return null;
   // Null (never judged with an answer): only the latest message is new, as when each message is judged in turn.
