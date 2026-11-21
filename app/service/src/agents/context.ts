@@ -5,7 +5,7 @@ import { findDownloadable, type Downloadable } from "../attachments/store.ts";
 import { currentMembership, VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
 import { IMAGE_TOKENS, pdfTokens } from "../metering/prices.ts";
-import type { AttachmentRef } from "../messages/model.ts";
+import { notAcknowledgement, type AttachmentRef } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
@@ -317,6 +317,11 @@ interface Loaded {
   /** An Agent's reply posted by a run (it goes after the owner's message it answers). */
   reply: boolean;
   /**
+   * It is a message a summary is made of (`notAcknowledgement`, the one rule summary/store.ts `countPlaced` counts by): an
+   * Agent's acknowledgement is not, so what is left out counts none (`late`).
+   */
+  placed: boolean;
+  /**
    * In a group, a message of someone else's: who said it, whether they are in the group now (`inGroupNow`: the roster
    * lists only those), and whether its text starts with a quote. `entry` is without the label, which goes before it once
    * the run's mark is drawn (`shown`).
@@ -339,6 +344,8 @@ interface MessageRow {
   attachment: AttachmentRef | null;
   reply_to: unknown;
   answers: string | null;
+  /** Not an acknowledgement (`notAcknowledgement`): a message a summary is made of. */
+  placed: boolean;
   /** The persona proposal the Agent's reply made, if any (`persona_proposals` by `message_id`). */
   proposal_persona: string | null;
   proposal_intro: string | null;
@@ -393,7 +400,7 @@ async function loadPage(
             $8::boolean and exists (select 1 from memberships sm
                                      where sm.conversation_id = m.conversation_id and sm.principal_id = m.sender_id and ${inGroupNow("sm")}) as sender_present,
             m.body ->> 'text' as text, case when m.seq > $3 then m.body -> 'attachment' end as attachment,
-            m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers,
+            m.body -> 'replyToSeq' as reply_to, r.covers_seq::text as answers, ${notAcknowledgement("m")} as placed,
             pp.persona as proposal_persona, pp.intro as proposal_intro, pp.field as proposal_field
        from messages m ${VISIBLE_JOIN}
        join principals sp on sp.id = m.sender_id
@@ -444,7 +451,7 @@ async function loadPage(
             quoted: quoted !== null,
           }
         : null;
-    return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null, speaker }];
+    return [{ entry, seq, answers: r.answers === null ? seq : Number(r.answers), reply: r.answers !== null, placed: r.placed, speaker }];
   });
   return { loaded, oldest: rows.length > 0 ? Number(rows[rows.length - 1]!.seq) : null, more: rows.length === limit };
 }
@@ -589,8 +596,8 @@ export async function loadContext(
   let leftOut: LeftOut | null = null;
   if (to !== null && to > after) {
     // Counted in two parts, so that no read reaches past `to`: what is stored at or before it, and what was loaded after it
-    // (every message after it is among those loaded) whose place is not.
-    const late = loaded.filter((l) => l.seq > to && l.answers > after && l.answers <= to).length;
+    // (every message after it is among those loaded) whose place is not — of what a summary is made of only (`placed`).
+    const late = loaded.filter((l) => l.placed && l.seq > to && l.answers > after && l.answers <= to).length;
     const messages = (await countPlaced(q, reader, after, to, to)) + late;
     if (messages > 0) leftOut = { to, messages };
   }

@@ -1015,6 +1015,37 @@ describe("final review", () => {
     expect((await summaryOf(w.g, w.agent.id))!.text).toBe(["人物与称呼", "ffm（@ffm）在群里", "说过的事", "主人（ffv（@ffv））说了很多", "定下的事", "还没解决的"].join("\n"));
   });
 
+  it("m-4: what a reply's context counts as left out counts as the job does: an acknowledgement placed before the window and stored in it is not counted", async () => {
+    const [v, m, n] = [await signUp(app, "fgv"), await signUp(app, "fgm"), await signUp(app, "fgn")];
+    const g = await group(app, v, "晚到群", [m, n]);
+    const agent = await mustCreateAgent(app, v, { handle: "fg_bot", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(v, g, agent.id);
+    const [q] = await seed(g, [v.id], ["很早的问题"]);
+    await seed(g, [v.id, m.id], Array.from({ length: 100 }, (_, i) => short(i)));
+    // The early question's run acknowledged only now, and answered: both placed at q, both stored late.
+    const run = await db.query<{ id: string }>(
+      `insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, created_at, started_at, finished_at)
+       values ('reply', $1, $2, $3, 'done', $4, now() - interval '1 hour', now() - interval '1 hour', now() - interval '1 hour') returning id`,
+      [g, agent.id, v.id, q],
+    );
+    await db.tx((t) => insertMessage(t, g, agent.id, "text", { text: "我查一下", ack: true } as never, `ack:${run.rows[0]!.id}`));
+    await db.tx((t) => insertMessage(t, g, agent.id, "text", { text: "迟到的回答" }, run.rows[0]!.id));
+    const tail = await seed(g, [v.id, m.id], Array.from({ length: 5 }, (_, i) => short(i, "末")));
+    const covers = tail.at(-1)!;
+    const loaded = await loadContext(
+      db,
+      { agentId: agent.id, ownerId: v.id, conversationId: g, coversSeq: covers, group: { maxTokens: 12_000, maxMessages: 80, after: 0, calls: [covers] }, planRatio: 1 },
+      { contextTokens: 200_000, vision: false, call: { maxOutputTokens: 1000 } } as Parameters<typeof loadContext>[2],
+      () => ({ text: "系统", rest: "系统", passage: "" }),
+    );
+    const shownPeople = loaded.entries.filter((e) => e.role === "user").length;
+    // Left out: q, the oldest short lines, and the late reply once — the acknowledgement not at all, as the job counts.
+    expect(loaded.leftOut).toEqual({ to: expect.any(Number), messages: 1 + 100 + 5 - shownPeople + 1 });
+    const reader = { agentId: agent.id, ownerId: v.id, conversationId: g, group: true };
+    const { countPlaced } = await import("../src/agents/summary/store.ts");
+    expect(await countPlaced(db, reader, 0, loaded.leftOut!.to)).toBe(loaded.leftOut!.messages);
+  });
+
   it("m-11: a rename loses nobody's lines from an older summary: each label is kept by whose it was, then shown and built on as that account is labelled now", async () => {
     const w = await groupWorld("fd", 0);
     // fdn's Agent speaks too: its label follows its owner's handle.
