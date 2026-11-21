@@ -12,6 +12,8 @@ import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
 import { modelsUsable, modelUsable } from "../models/resolve.ts";
 import { agentModelOf, lockAgent, type AgentRow } from "./store.ts";
+import { ELSEWHERE_OPEN_MAX } from "./tools/elsewhere.ts";
+import { afterTell, type Whisper } from "../whispers/store.ts";
 
 /**
  * Reply runs (`agent_runs` rows of purpose `reply`) as the routes and the send path see them: the trigger, retry, stop,
@@ -1583,11 +1585,23 @@ async function retryInGroup(
  * a current member of (whose row is locked first, `lockForWrite`, as every writer of runs there does), one of the
  * caller's Agents' runs there: another member's Agent's run is the 404 of a run that does not exist.
  */
-export async function stopRun(t: Tx, ownerId: string, conversationId: string, runId: string): Promise<{ stopped: Announced | null; running: boolean }> {
-  if (await isGroup(t, conversationId)) await lockForWrite(t, conversationId, ownerId);
+export async function stopRun(
+  t: Tx,
+  ownerId: string,
+  conversationId: string,
+  runId: string,
+  config: RunLimits,
+): Promise<{ stopped: Announced | null; running: boolean; followed: FollowUp; whisper: Whisper | null }> {
+  const group = await isGroup(t, conversationId);
+  if (group) await lockForWrite(t, conversationId, ownerId);
   else if (!(await ownedAgentOf(t, ownerId, conversationId))) throw notFound();
-  const { rows } = await t.query<{ status: RunStatus }>(
-    "select status from agent_runs where id = $1 and conversation_id = $2 and owner_id = $3 and purpose = 'reply' for update",
+  // A told reply's Agent row before the run's (the lock order): its stop may follow up what was noted on it.
+  const peek = group
+    ? (await t.query<{ agent_id: string }>("select agent_id from agent_runs where id = $1 and conversation_id = $2 and owner_id = $3 and whisper_id is not null", [runId, conversationId, ownerId])).rows[0]
+    : undefined;
+  const agent = peek ? await lockAgent(t, peek.agent_id, conversationId) : null;
+  const { rows } = await t.query<{ status: RunStatus; covers: string | null; pending: string | null; calls: string[] | null }>(
+    "select status, covers_seq::text as covers, pending_seq::text as pending, call_seqs::text[] as calls from agent_runs where id = $1 and conversation_id = $2 and owner_id = $3 and purpose = 'reply' for update",
     [runId, conversationId, ownerId],
   );
   const status = rows[0]?.status;
@@ -1596,14 +1610,26 @@ export async function stopRun(t: Tx, ownerId: string, conversationId: string, ru
     // Kept in the row (`stop_asked`): an attempt that begins after this — the same, or the next after its admission held
     // it back — ends stopped (port-impl.ts `halted`), whatever this process's flags say.
     await t.query("update agent_runs set stop_asked = true where id = $1", [runId]);
-    return { stopped: null, running: true };
+    return { stopped: null, running: true, followed: followUpOf(null), whisper: null };
   }
-  if (status !== "queued") return { stopped: null, running: false };
+  if (status !== "queued") return { stopped: null, running: false, followed: followUpOf(null), whisper: null };
   const stopped = await t.query<RunRow>(
-    `update agent_runs as r set status = 'stopped', finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
+    `update agent_runs as r set status = 'stopped', finished_at = now(),
+            pending_seq = case when r.whisper_id is null then r.pending_seq end, call_seqs = case when r.whisper_id is null then r.call_seqs else '{}' end
+      where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId],
   );
-  return { stopped: { ownerId, conversationId, run: toWireRun(stopped.rows[0]!) }, running: false };
+  const ended = { ownerId, conversationId, run: toWireRun(stopped.rows[0]!) };
+  if (agent === null) return { stopped: ended, running: false, followed: followUpOf(null), whisper: null };
+  // A told reply (`告诉他们`) its owner stops while queued: the stop ends the tell — its whisper goes back to its owner,
+  // open (whispers/store.ts `afterTell`) — but not the members' questions noted on it, which get their ordinary follow-up
+  // at once, by the rule every other ending of a told reply follows (port-impl.ts `keepsNothingNoted`; round 3).
+  const [covers, pending] = [Number(rows[0]!.covers ?? 0), Number(rows[0]!.pending ?? 0)];
+  const followed =
+    pending > covers && !agent.paused && !agent.deleted && agent.model !== null
+      ? await followUp(t, agent, conversationId, covers, pending, rows[0]!.calls, config)
+      : followUpOf(null);
+  return { stopped: ended, running: false, followed, whisper: await afterTell(t, runId, false, ELSEWHERE_OPEN_MAX) };
 }
 
 /** A failure its owner dismissed in a group: the others are told its Agent's state again (`Hub.pushRunState`). */

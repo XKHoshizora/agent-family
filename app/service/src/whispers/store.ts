@@ -80,6 +80,8 @@ export interface Whisper {
   status: WhisperStatus;
   createdAt: Date;
   resolvedAt: Date | null;
+  /** Raised by one at every change of its status (migration 057): which of two copies is the later. */
+  revision: number;
 }
 
 interface WhisperRow {
@@ -93,10 +95,11 @@ interface WhisperRow {
   status: WhisperStatus;
   created_at: Date;
   resolved_at: Date | null;
+  revision: number;
 }
 
 const columns = (alias: string): string =>
-  ["id", "conversation_id", "owner_id", "agent_id", "after_seq", "kind", "body", "status", "created_at", "resolved_at"].map((c) => `${alias}.${c}`).join(", ");
+  ["id", "conversation_id", "owner_id", "agent_id", "after_seq", "kind", "body", "status", "created_at", "resolved_at", "revision"].map((c) => `${alias}.${c}`).join(", ");
 const COLUMNS = columns("whispers");
 
 const toWhisper = (r: WhisperRow): Whisper => ({
@@ -110,6 +113,7 @@ const toWhisper = (r: WhisperRow): Whisper => ({
   status: r.status,
   createdAt: r.created_at,
   resolvedAt: r.resolved_at,
+  revision: r.revision,
 });
 
 /** Why a body that is one in shape cannot be kept (content-free: what a refusal's warning says). */
@@ -265,6 +269,68 @@ export async function detailOfRunWhisper(q: Queryable, runId: string): Promise<{
 }
 
 /**
+ * What the end of reply run `runId` does to the whisper it was queued to tell (`agent_runs.whisper_id`: 告诉他们 answered it
+ * `accepted`; round 3, a tell is never lost), under the conversation's row, which the caller holds (every writer of the
+ * kind's whispers there takes it). When nothing of the reply was posted (`posted` false: it failed, was recovered, released,
+ * swept, stopped or cancelled), the whisper goes back to `open` — its hits and both buttons, for its owner to tell once more
+ * or not — unless it is no longer `accepted` (reopened already: idempotent), its owner or its Agent is no longer a current
+ * member of the conversation or the Agent is deleted (a leaving or a delete closes it for good), or its owner has `openMax`
+ * of the kind open there already (the kind's cap, which a reopened one counts toward). When the reply was posted, the tell
+ * was made: a whisper open again since (its run retried after a reopening) is answered again. Returns the whisper when it
+ * changed — for its owner's sockets alone once committed — else null. Whisper rows last, as everywhere.
+ */
+export async function afterTell(t: Tx, runId: string, posted: boolean, openMax: number): Promise<Whisper | null> {
+  const { rows } = posted
+    ? await t.query<WhisperRow>(
+        `update whispers w set status = 'accepted', resolved_at = now(), revision = w.revision + 1
+           from agent_runs r
+          where r.id = $1 and w.id = r.whisper_id and w.owner_id = r.owner_id and w.status = 'open'
+          returning ${columns("w")}`,
+        [runId],
+      )
+    : await t.query<WhisperRow>(
+        `update whispers w set status = 'open', resolved_at = null, revision = w.revision + 1
+           from agent_runs r
+          where r.id = $1 and w.id = r.whisper_id and w.owner_id = r.owner_id and w.kind = 'found_elsewhere' and w.status = 'accepted'
+            and exists (select 1 from memberships me where me.conversation_id = w.conversation_id and me.principal_id = w.owner_id and me.left_seq is null)
+            and exists (select 1 from memberships am join agents a on a.principal_id = am.principal_id
+                         where am.conversation_id = w.conversation_id and am.principal_id = w.agent_id and am.left_seq is null and a.deleted_at is null)
+            and (select count(*) from whispers o
+                  where o.owner_id = w.owner_id and o.conversation_id = w.conversation_id and o.kind = 'found_elsewhere' and o.status = 'open') < $2
+          returning ${columns("w")}`,
+        [runId, openMax],
+      );
+  return rows[0] ? toWhisper(rows[0]) : null;
+}
+
+/**
+ * The told replies among `runIds` that a transaction which could not hold their conversations' rows has ended without
+ * posting (a pause's or a resume's, which holds the Agent's: runs.ts `interruptRuns`, `endWhatPauseMissed`): each one's
+ * whisper is given `afterTell` in a transaction of its own, after that one committed, under its conversation's row and then
+ * the Agent's (`for share`), the lock order. Returns the whispers that changed, for their owners' sockets.
+ */
+export async function afterTellsEnded(db: { tx: <T>(fn: (t: Tx) => Promise<T>) => Promise<T> }, runIds: readonly string[], openMax: number): Promise<Whisper[]> {
+  const changed: Whisper[] = [];
+  for (const runId of runIds) {
+    const w = await db.tx(async (t) => {
+      const { rows } = await t.query<{ conversation_id: string; agent_id: string; status: string; told: boolean; posted: boolean }>(
+        `select r.conversation_id, r.agent_id, r.status, r.whisper_id is not null as told,
+                exists (select 1 from messages m where m.conversation_id = r.conversation_id and m.sender_id = r.agent_id and m.client_txn = r.id::text) as posted
+           from agent_runs r where r.id = $1`,
+        [runId],
+      );
+      const run = rows[0];
+      if (!run || !run.told || run.status === "queued" || run.status === "running") return null;
+      await lockConversation(t, run.conversation_id);
+      await t.query("select 1 from agents where principal_id = $1 for share", [run.agent_id]);
+      return afterTell(t, runId, run.posted, openMax);
+    });
+    if (w) changed.push(w);
+  }
+  return changed;
+}
+
+/**
  * The owner's answer to their whisper `id`: `accepted` (its `tell` button) or `declined` (its `dismiss`). Changes its status
  * and nothing else (what an answer does for a kind is the caller's, whispers/routes.ts `ANSWER_HOOKS`). "gone" when there is
  * no whisper `id` of `ownerId`'s — anyone else's and none are found by the same single read —, and as well when its Agent
@@ -290,7 +356,7 @@ export async function resolveWhisper(t: Tx, ownerId: string, id: string, to: Whi
   );
   if (present.rows[0]?.n !== 2) return "gone";
   if (row.status !== "open" || !Array.isArray(row.body.actions) || !row.body.actions.includes(BUTTON_OF[to])) return "stale";
-  const updated = await t.query<WhisperRow>(`update whispers set status = $2, resolved_at = now() where id = $1 returning ${COLUMNS}`, [id, to]);
+  const updated = await t.query<WhisperRow>(`update whispers set status = $2, resolved_at = now(), revision = revision + 1 where id = $1 returning ${COLUMNS}`, [id, to]);
   return toWhisper(updated.rows[0]!);
 }
 
@@ -382,7 +448,7 @@ export async function expireOnLeave(t: Tx, conversationId: string, leaving: read
           and owner_id in (select coalesce(p.owner_id, p.id) from principals p where p.id = any($2::uuid[]))
           and (owner_id = any($2::uuid[]) or agent_id = any($2::uuid[]))
         order by id for update)
-     update whispers set status = 'expired', resolved_at = now()
+     update whispers set status = 'expired', resolved_at = now(), revision = revision + 1
       where id in (select id from batch)
       returning ${COLUMNS}`,
     [conversationId, leaving],
@@ -397,7 +463,7 @@ export async function expireOfAgent(t: Tx, agentId: string): Promise<Whisper[]> 
     `with batch as materialized (
        select id from whispers where owner_id = (select owner_id from principals where id = $1) and agent_id = $1 and status = 'open'
         order by id for update)
-     update whispers set status = 'expired', resolved_at = now()
+     update whispers set status = 'expired', resolved_at = now(), revision = revision + 1
       where id in (select id from batch)
       returning ${COLUMNS}`,
     [agentId],
@@ -424,7 +490,7 @@ export async function expireWhispers(q: Queryable, now: Date = new Date(), limit
       `with batch as materialized (
          select id from whispers where status = 'open' and created_at < $1::timestamptz - $2::int * interval '1 day'
           order by id limit $3 for update skip locked)
-       update whispers set status = 'expired', resolved_at = $1::timestamptz
+       update whispers set status = 'expired', resolved_at = $1::timestamptz, revision = revision + 1
         where id in (select id from batch) and status = 'open'
         returning ${COLUMNS}`,
       [now, WHISPER_OPEN_DAYS, batch],

@@ -17,7 +17,8 @@ import { NAME_PART_PATTERN, swapAvatarKey } from "../principals/store.ts";
 import { agentName, userText, uuidParam } from "../schemas.ts";
 import { requirePrincipal } from "../session.ts";
 import { pushWhispers } from "../whispers/routes.ts";
-import { expireOfAgent } from "../whispers/store.ts";
+import { afterTellsEnded, expireOfAgent } from "../whispers/store.ts";
+import { ELSEWHERE_OPEN_MAX } from "./tools/elsewhere.ts";
 import { toWireWhisper } from "../whispers/wire.ts";
 import { createAgent, resetTopic } from "./conversation.ts";
 import { leaveGroupsOfDeleted } from "./group-leave.ts";
@@ -480,6 +481,16 @@ export function registerAgentRoutes(
           // Before answering: from now on nothing of those runs reaches the owner, and their calls are abandoned.
           app.agentPort.interruptRuns(interrupted.running);
           for (const cancelled of interrupted.cancelled) app.agentPort.announce(cancelled);
+        }
+        if (interrupted && !("deleted" in change)) {
+          // A told reply (`告诉他们`) this pause or resume cancelled while it was queued gives its whisper back to its owner,
+          // open (round 3: a tell is never lost): in a transaction of its own per run, under its group's row, which this one
+          // does not hold (whispers/store.ts `afterTellsEnded`). A delete closes its whispers for good instead (above).
+          const given = await afterTellsEnded(db, interrupted.cancelled.map((c) => c.run.id), ELSEWHERE_OPEN_MAX).catch((err: unknown) => {
+            req.log.error({ err, agentId: agent.id }, "a cancelled told reply's whisper could not be given back to its owner");
+            return [];
+          });
+          pushWhispers(app.realtime, given);
         }
         if (changed) {
           conversations.publish({ messages: [], conversations: [{ conversationId: agent.conversationId, principalIds: [me.id] }] }, req.log);

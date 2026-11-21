@@ -120,6 +120,8 @@ const HIDDEN_KEYS = [
   "held_back_by",
   "stopAsked",
   "stop_asked",
+  // A whisper's revision (migration 057): its owner's only, as every whisper field.
+  "revision",
 ];
 const HUMAN_PRINCIPAL_KEYS = ["avatarVersion", "displayName", "handle", "id", "kind"];
 

@@ -1431,7 +1431,8 @@ sent again.
 
 **WireWhisper**: `{"id", "conversationId", "agentId", "afterSeq": 42, "kind": "found_elsewhere" | "tools_off" | "memory" | "allowance",
 "text": "…", "actions": ["tell", "dismiss"], "status": "open" | "accepted" | "declined" | "expired", "createdAt",
-"detail"?: …}`. `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
+"revision": 0, "detail"?: …}`. `revision` is raised by one at every change of its status (an answer, an expiry, a
+reopening, below): of two copies a client holds the one with the higher (a copy read before a change never undoes it). `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
 `detail` what its kind keeps with it, when it has any: at most 8 192 bytes of JSON (utf-8), nested at most 6 deep, at most
 200 values; no string in a whisper holds U+0000 or a lone surrogate (the service makes no whisper whose body breaks one of
 these, and logs only its kind). An open whisper is answered once; it expires — `status: "expired"`, pushed to its owner —
@@ -1477,9 +1478,18 @@ group only up to what it covers; its follow-up then answers exactly the calls re
 sent is none of them, whatever has changed since — as an ordinary reply: with tools, in the caller's lane, each held to
 the block rule as any follow-up's calls. Those calls are never held to you: however the told reply ends — posted or
 not, failed as it ran, ended by recovery, a release or the stale-run sweep (where a failed run is otherwise followed by
-nothing) — they go to that follow-up at once, and the told reply keeps none of them. A retry of a told reply that failed
-keeps its whisper, and tells again what it covered, with nothing noted; it is offered while the told reply is the Agent's
-latest run there (a follow-up of its noted calls, being later, takes that place). It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
+nothing) — they go to that follow-up at once, and the told reply keeps none of them. A tell is never lost: when a told reply ends having posted nothing — it failed, recovery, a release or the stale-run
+sweep ended it, you stopped it (queued or under way), or your pause cancelled it — its whisper goes back to `open`
+(`revision` raised, pushed to you alone: no frame, count or key reaches anyone else), with its hits and both buttons, so
+`告诉他们` tells once more (a fresh told reply) or `不用` declines (`whispers/store.ts` `afterTell`). Not when it posted (it
+stays `accepted`; one open again since, its run retried, is answered again when that posts), nor when you or the Agent
+are no longer in the group, the Agent is deleted, or you have 3 `found_elsewhere` whispers open there already (a reopened
+one counts); once reopened, any other ending of it changes nothing. Stopping a told reply while it is queued ends the
+tell only: the members' calls noted on it still get their ordinary follow-up. (`让 Agent 停下`, a group member's halt, does
+not touch a told reply at all — it is your own, a person's call: it ends the runs Agents' messages called for and the
+replies nobody asked for, and a follow-up of noted calls that only Agents' messages made is such a run.) A retry of a told
+reply that failed keeps its whisper, and tells again what it covered, with nothing noted; it is offered while the told
+reply is the Agent's latest run there. It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
 `busy_run` (a reply of it queued or running there), 429 `rate_limited` (your own replies a minute) — each leaves the
 whisper open, to answer again. `不用` (decline) does nothing more. Vault notes are not involved: hits are messages.
 `tools_off` — a reply found its provider model unable to use tools and the model was marked so

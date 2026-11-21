@@ -15,13 +15,13 @@ import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
-import { toldHits, toldPassage, TOLD_TURN } from "./tools/elsewhere.ts";
+import { ELSEWHERE_OPEN_MAX, toldHits, toldPassage, TOLD_TURN } from "./tools/elsewhere.ts";
 import { citesIn, RunRefs, withoutCitations } from "./tools/refs.ts";
 import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { markToolsOff } from "../providers/store.ts";
 import type { Hub } from "../sync/hub.ts";
-import { createWhisper, type WhisperBody } from "../whispers/store.ts";
+import { afterTell, createWhisper, type Whisper, type WhisperBody } from "../whispers/store.ts";
 import { toWireWhisper } from "../whispers/wire.ts";
 import {
   askerLine,
@@ -1119,6 +1119,8 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
+    // A told reply's whisper given back (or answered again): to its owner alone.
+    if (result.whisper) this.deps.realtime.pushWhisper(result.whisper.ownerId, toWireWhisper(result.whisper));
     // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself), and
     // what its context left out may be folded into the pair's rolling summary. An acknowledgement alone is nothing to
     // remember (memory/review.ts `UNSPOKEN`).
@@ -1155,7 +1157,7 @@ export class DbAgentPort implements AgentPort {
         const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
         if (!current.rows[0]) return null;
         const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) };
-        return { ended, followed: followUpOf(null), interrupted: false, reply: null, reminder: null };
+        return { ended, followed: followUpOf(null), interrupted: false, reply: null, reminder: null, whisper: null };
       }
       // Its reply (its acknowledgement, if it posted one, is not: `ack:<run id>`).
       const said = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
@@ -1187,15 +1189,16 @@ export class DbAgentPort implements AgentPort {
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent, final);
+      const followed =
+        next === null ? followUpOf(null) : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config);
       return {
         ended,
-        followed:
-          next === null
-            ? followUpOf(null)
-            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config),
+        followed,
         interrupted: state.rows[0].interrupted !== null,
         reply: reply ? Number(reply.seq) : null,
         reminder,
+        // A told reply that posted nothing gives its whisper back to its owner (whispers/store.ts `afterTell`), last.
+        whisper: state.rows[0].told ? await afterTell(t, run.id, reply !== undefined, ELSEWHERE_OPEN_MAX) : null,
       };
     });
   }
@@ -1229,6 +1232,7 @@ export class DbAgentPort implements AgentPort {
     if (charged !== null) this.deps.realtime.pushChargedReply(charged.conversationId, charged.ownerId, charged.seq);
     for (const a of recovered.runs) this.announce(a);
     this.tell(recovered.told);
+    if (recovered.whisper) this.deps.realtime.pushWhisper(recovered.whisper.ownerId, toWireWhisper(recovered.whisper));
     return true;
   }
 }
@@ -1243,6 +1247,8 @@ interface Recorded {
   reply: number | null;
   /** The reminder about money its settlement recorded (metering/reminders.ts), its whisper to make once committed; null when none. */
   reminder: string | null;
+  /** A told reply's whisper its end changed (whispers/store.ts `afterTell`), to push to its owner; null when none. */
+  whisper: Whisper | null;
 }
 
 /**
@@ -1254,6 +1260,8 @@ interface Recovered {
   told: Told;
   /** The reply the run had posted, now charged (`Hub.pushChargedReply`); null when it posted none. */
   charged: { conversationId: string; ownerId: string; seq: number } | null;
+  /** A told reply's whisper its end changed (whispers/store.ts `afterTell`), to push to its owner; null when none. */
+  whisper: Whisper | null;
 }
 
 /** A run's flags as an attempt starts. */
@@ -1341,7 +1349,7 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
       where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId, end.status, error, droppedOnEnd(end), state.told],
   );
-  if (reply === null) return { runs: [], told: noneTold(), charged: null };
+  if (reply === null) return { runs: [], told: noneTold(), charged: null, whisper: null };
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   // A failed run is followed by nothing on its own (its retry answers everything) — but a told reply's noted calls, which
@@ -1353,6 +1361,8 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
     runs: followed ? [ended, followed] : [ended],
     told,
     charged: posted ? { conversationId, ownerId: agent.ownerId, seq: Number(posted.seq) } : null,
+    // A told reply that posted nothing gives its whisper back (whispers/store.ts `afterTell`), last.
+    whisper: state.told ? await afterTell(t, runId, posted !== undefined, ELSEWHERE_OPEN_MAX) : null,
   };
 }
 
