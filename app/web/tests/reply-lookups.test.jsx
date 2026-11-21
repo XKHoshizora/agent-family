@@ -467,6 +467,28 @@ describe("a reply's citations are its links, and nothing wherever its text is pr
     expect(document.querySelector(".reply-chip span").textContent).toBe(`回复 小助手：${SHOWN}`);
   });
 
+  // An Agent I do not hold (it has left the group, say): the wire says it is one — a quote's senderKind, a search answer's principals.
+  const GONE = "00000000-0000-4000-8000-0000000000d9";
+
+  it("the quote of an Agent's reply shows no citation also when I no longer hold that Agent (the quote's senderKind says so; round 3)", async () => {
+    await openChats({
+      open: "周末小组",
+      groupMessages: [wire(G1, 2, ME_ID, "好的", { replyTo: { seq: 1, visible: true, senderId: GONE, senderKind: "agent", text: CITED, kind: "text" } })],
+    });
+    expect(storedLi(2).querySelector("blockquote").textContent).toContain(SHOWN);
+    expect(storedLi(2).querySelector("blockquote").textContent).not.toContain("〔");
+  });
+
+  it("a search hit of an Agent I no longer hold shows no citation (its answer's principals say it is an Agent; round 3)", async () => {
+    const gone = { id: GONE, handle: "olive.gone_bot", displayName: "走了的助手", avatarVersion: 0, kind: "agent" };
+    const searchAll = vi.fn(async () => ({ messages: [wire(G1, 1, GONE, CITED, { createdAt: at(1) })], nextBefore: null, principals: { [GONE]: gone } }));
+    await openChats({ groupMessages: [wire(G1, 2, BO, "最新的一条")], api: { searchAll } });
+    fireEvent.change(screen.getByLabelText("搜索联系人、群聊"), { target: { value: "春熙路" } });
+    await elapse(300);
+    const row = document.querySelector(".list-col .row-preview mark").closest("button");
+    expect(row.querySelector(".row-preview").textContent).toBe(`走了的助手：${SHOWN}`);
+  });
+
   it("a hit of the list's search that is an Agent's reply shows no citation", async () => {
     const searchAll = vi.fn(async () => ({ messages: [wire(G1, 1, OAG, CITED, { createdAt: at(1) })], nextBefore: null, principals: {} }));
     await openChats({ groupMessages: [wire(G1, 1, OAG, CITED)], api: { searchAll } });

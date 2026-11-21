@@ -23,7 +23,7 @@ function Quote({ quote }) {
   return (
     <blockquote>
       <strong>{quote.from ? senderName(state, quote.from) : ""}</strong>
-      {quote.kind === "file" ? quote.attachmentName : lineText(state, quote.from, quote.text)}
+      {quote.kind === "file" ? quote.attachmentName : lineText(state, quote.from, quote.text, quote.senderKind)}
     </blockquote>
   );
 }

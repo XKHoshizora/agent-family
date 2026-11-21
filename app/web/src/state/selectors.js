@@ -8,9 +8,12 @@ export const isAgent = (state, id) => Boolean(state.agents[id]);
 
 /**
  * A message's text as a line shows it anywhere but in the message itself (a search hit, a quote, the reply chip): an
- * Agent's without its citations (`〔m3〕`, `〔f2〕`: links in the message, ui/citations.js); anyone else's as written.
+ * Agent's without its citations (`〔m3〕`, `〔f2〕`: links in the message, ui/citations.js); anyone else's as written. Who
+ * wrote it is an Agent held here, or one the service said is (`kind`: a quote's `senderKind`; a principal's own `kind`,
+ * as an answer's `principals` bring it) — also when that Agent is no longer held.
  */
-export const lineText = (state, from, text) => (typeof text === "string" && isAgent(state, from) ? withoutCitations(text) : text);
+export const lineText = (state, from, text, kind = null) =>
+  typeof text === "string" && (kind === "agent" || isAgent(state, from) || state.principals?.[from]?.kind === "agent") ? withoutCitations(text) : text;
 /** One of my own Agents (never someone else's). */
 export const isMyAgent = (state, id) => Boolean(state.agents[id]?.mine);
 /** An Agent's owner ("me" for mine; null when nobody said), anyone else themselves. Unknown by name: nameOf says 未知. */
