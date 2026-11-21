@@ -62,6 +62,8 @@ function quoteView(replyTo, alias) {
     text: replyTo.text ?? "",
     kind: replyTo.kind ?? "text",
     attachmentName: replyTo.attachmentName ?? null,
+    // Whether a person or an Agent wrote it, as the service says (also for an Agent no longer held here).
+    senderKind: replyTo.senderKind === "agent" || replyTo.senderKind === "human" ? replyTo.senderKind : null,
   };
 }
 

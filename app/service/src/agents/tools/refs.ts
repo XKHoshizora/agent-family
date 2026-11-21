@@ -55,18 +55,41 @@ const normalised = (ref: string): string => ref.replace(/\s+/g, "").toLowerCase(
  * or a capital letter (`〔 M3 〕`), read as the number they name (`messageOf`).
  */
 const CITATION = /〔\s*([mMfF])\s*([1-9][0-9]{0,5})\s*〕/g;
+/** What a citation holds between its brackets (`CITATION`'s inside). */
+const INSIDE = /^\s*[mMfF]\s*[1-9][0-9]{0,5}\s*$/;
 
 /**
  * `text` without any citation in it (`〔m3〕`, `〔f2〕`, however written): what every text the model is shown and did
  * not write in its own run goes through (I-2: a number means something only in the run that gave it, so an earlier
  * reply's `〔m1〕` copied into this one would link whatever this run's `m1` is) — earlier messages and their quotes in
  * its context, the files it reads, what its searches and its memory show it — and an acknowledgement, which cites nothing.
- * Taken out until none is left: one built around another (`〔m〔m1〕1〕`) leaves no citation behind.
+ * Taken out until none is left: one built around another (`〔m〔m1〕1〕`) leaves no citation behind — what taking them out
+ * again and again would leave, in ONE pass, in time proportional to the text however it nests (round 2, N-1; the shape of
+ * runtime/prompt.ts `withoutMark`): the text is copied, keeping where each `〔` that may still open a citation stands in the
+ * copy; at a `〕`, what follows the last such `〔` is a citation's inside or not — a citation is taken out of the copy, so
+ * that a `〔` before it may still open one; anything else stays, and then no `〔` before it can open one any more (a
+ * citation holds no bracket). Each character is copied once and looked at by at most one test that keeps it.
  */
 export function withoutCitations(text: string): string {
-  let out = text;
-  for (let next = out.replace(CITATION, ""); next !== out; next = out.replace(CITATION, "")) out = next;
-  return out;
+  if (!text.includes("〕")) return text;
+  const out: string[] = [];
+  const opens: number[] = [];
+  for (const ch of text) {
+    if (ch === "〔") {
+      opens.push(out.length);
+      out.push(ch);
+    } else if (ch === "〕" && opens.length > 0) {
+      const at = opens[opens.length - 1]!;
+      if (INSIDE.test(out.slice(at + 1).join(""))) {
+        out.length = at;
+        opens.pop();
+      } else {
+        opens.length = 0;
+        out.push(ch);
+      }
+    } else out.push(ch);
+  }
+  return out.join("");
 }
 
 /**

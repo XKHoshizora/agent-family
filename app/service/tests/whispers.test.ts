@@ -240,7 +240,7 @@ describe("the owner learns of it", () => {
     const push = await socket.next((e) => e.type === "whisper");
     expect(push).toEqual({
       type: "whisper",
-      whisper: { id: made.id, conversationId: w.g, agentId: w.agent.id, afterSeq: made.afterSeq, kind: "found_elsewhere", text: BODY.text, actions: ["tell", "dismiss"], status: "open", createdAt: made.createdAt.toISOString() },
+      whisper: { id: made.id, conversationId: w.g, agentId: w.agent.id, afterSeq: made.afterSeq, kind: "found_elsewhere", text: BODY.text, actions: ["tell", "dismiss"], status: "open", createdAt: made.createdAt.toISOString(), revision: 0 },
     });
   });
 
@@ -412,7 +412,8 @@ describe("answering", () => {
     const b = await whisper(w);
     await socket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id);
     const accepted = await api(app, w.owner, "POST", `/api/whispers/${a.id}/accept`);
-    expect(accepted).toEqual({ status: 200, json: { ...JSON.parse(JSON.stringify(toWireWhisper(a))), status: "accepted" } });
+    // Answered: its status, and its revision raised by one (migration 057: which copy is the later).
+    expect(accepted).toEqual({ status: 200, json: { ...JSON.parse(JSON.stringify(toWireWhisper(a))), status: "accepted", revision: a.revision + 1 } });
     expect(await socket.next((e) => e.type === "whisper" && e.whisper.status === "accepted")).toEqual({ type: "whisper", whisper: accepted.json });
     expect(await api(app, w.owner, "POST", `/api/whispers/${a.id}/accept`)).toEqual({ status: 409, json: { error: "stale_whisper" } });
     expect(await api(app, w.owner, "POST", `/api/whispers/${a.id}/decline`)).toEqual({ status: 409, json: { error: "stale_whisper" } });

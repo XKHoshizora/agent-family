@@ -214,6 +214,23 @@ describe("a whisper in the conversation", () => {
     await push(transport, { type: "whisper", whisper: whisper("w9", "00000000-0000-4000-8000-0000000000ff", 1) });
     expect(document.querySelectorAll(".msg-whisper")).toHaveLength(1);
   });
+
+  it("a told reply that posted nothing gives its whisper back: a later copy (a higher revision) that says open brings its hits and both buttons back, and the dot; an older one never undoes the later (round 3)", async () => {
+    const hits = [{ where: "乙群", who: "mia", when: "2026-11-20 10:00", text: "蓝鲸计划在三楼" }];
+    const { transport } = await openGroup({ whispers: [whisper("w1", G1, 3, { detail: { hits }, revision: 0 })] });
+    await push(transport, { type: "whisper", whisper: whisper("w1", G1, 3, { detail: { hits }, status: "accepted", revision: 1 }) });
+    expect(whisperLi("w1").textContent).toBe("已告诉他们");
+    expect(within(listRow("周末小组")).queryByLabelText(DOT)).toBeNull();
+    // Given back, open again.
+    await push(transport, { type: "whisper", whisper: whisper("w1", G1, 3, { detail: { hits }, revision: 2 }) });
+    expect(inWhisper("w1").getByRole("button", { name: "告诉他们" })).toBeTruthy();
+    expect(inWhisper("w1").getByRole("button", { name: "不用" })).toBeTruthy();
+    expect(whisperLi("w1").textContent).toContain("蓝鲸计划在三楼");
+    expect(within(listRow("周末小组")).getByLabelText(DOT)).toBeTruthy();
+    // A copy read before (accepted, revision 1) arriving late changes nothing.
+    await push(transport, { type: "whisper", whisper: whisper("w1", G1, 3, { detail: { hits }, status: "accepted", revision: 1 }) });
+    expect(inWhisper("w1").getByRole("button", { name: "告诉他们" })).toBeTruthy();
+  });
 });
 
 describe("with older history", () => {

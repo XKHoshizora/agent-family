@@ -15,19 +15,20 @@ import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
-import { toldHits, toldPassage, TOLD_TURN } from "./tools/elsewhere.ts";
+import { ELSEWHERE_OPEN_MAX, toldHits, toldPassage, TOLD_TURN } from "./tools/elsewhere.ts";
 import { citesIn, RunRefs, withoutCitations } from "./tools/refs.ts";
 import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { markToolsOff } from "../providers/store.ts";
 import type { Hub } from "../sync/hub.ts";
-import { createWhisper, type WhisperBody } from "../whispers/store.ts";
+import { afterTell, createWhisper, type Whisper, type WhisperBody } from "../whispers/store.ts";
 import { toWireWhisper } from "../whispers/wire.ts";
 import {
   askerLine,
   BlobStoreDown,
   buildContext,
   callsSeen,
+  readPairSummary,
   GROUP_CONTEXT_MESSAGES,
   hasOwnerTurn,
   loadContext,
@@ -254,6 +255,14 @@ function followUpSeq(state: RunState, agent: AgentRow, end: RunEnd): number | nu
 
 /** A run that ends so is followed by nothing, and what was noted on it (`pending_seq`) is cleared as it ends. */
 const droppedOnEnd = (end: RunEnd): boolean => end.status === "cancelled" && end.error === "agent_removed";
+
+/*
+ * `keepsNothingNoted` (round 2, N-3): the members' calls noted on a told reply (`告诉他们`) are never held to its owner. However
+ * it ends — posted or not; failed as it ran (`finish`), or ended by recovery at start-up, a release or the stale-run sweep
+ * (`recoverRun`, which follows no other failed run) — they go to an ordinary follow-up at once by the one rule
+ * (`followUpSeq`: unless the Agent's pause, delete, leaving or missing model dropped them, as for any run), and the told
+ * run keeps none of them (`pending_seq` cleared, `call_seqs` empty): a retry of it tells with nothing noted.
+ */
 
 /**
  * A run's in-process flags, from its claim until it has finished. A delta waiting to be delivered keeps the flags it
@@ -666,6 +675,9 @@ export class DbAgentPort implements AgentPort {
       const calls = group ? await callsSeen(t, agent.id, run.id, line) : [];
       if (group && calls.length === 0 && told === null) return { end: NOTHING_LEFT };
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: line, calls } : null;
+      // The pair's summary and what of it may be shown, read once for every plan below (round 2, N-4: two indexed reads at
+      // most, nothing of the conversation's history), here, under the row its job writes it under.
+      const summary = await readPairSummary(t, { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, group });
       const plan = {
         agentId: agent.id,
         ownerId: agent.ownerId,
@@ -673,6 +685,7 @@ export class DbAgentPort implements AgentPort {
         coversSeq: covers,
         group: cap,
         planRatio: planned,
+        summary,
         // A told reply is shown the group up to what it covers: a call noted on it since is its follow-up's.
         ...(told !== null ? { upTo: covers } : {}),
       };
@@ -1106,6 +1119,8 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
+    // A told reply's whisper given back (or answered again): to its owner alone.
+    if (result.whisper) this.deps.realtime.pushWhisper(result.whisper.ownerId, toWireWhisper(result.whisper));
     // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself), and
     // what its context left out may be folded into the pair's rolling summary. An acknowledgement alone is nothing to
     // remember (memory/review.ts `UNSPOKEN`).
@@ -1142,7 +1157,7 @@ export class DbAgentPort implements AgentPort {
         const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
         if (!current.rows[0]) return null;
         const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) };
-        return { ended, followed: followUpOf(null), interrupted: false, reply: null, reminder: null };
+        return { ended, followed: followUpOf(null), interrupted: false, reply: null, reminder: null, whisper: null };
       }
       // Its reply (its acknowledgement, if it posted one, is not: `ack:<run id>`).
       const said = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
@@ -1164,23 +1179,26 @@ export class DbAgentPort implements AgentPort {
       const reminder = await remindInSettlement(t, config, run.ownerId, settled, now, agent.deleted ? null : agent.id);
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
       const resetsAt = final.status === "failed" && final.resetsAt !== undefined ? final.resetsAt : null;
+      // A told reply keeps nothing noted once its end has decided its follow-up (`keepsNothingNoted`).
       const updated = await t.query<RunRow>(
         `update agent_runs as r set status = $2, error = $3, resets_at = $4, finished_at = now(),
-                pending_seq = case when $5::boolean then null else r.pending_seq end
+                pending_seq = case when $5::boolean or $6::boolean then null else r.pending_seq end,
+                call_seqs = case when $6::boolean then '{}' else r.call_seqs end
           where r.id = $1 returning ${RUN_COLUMNS}`,
-        [run.id, final.status, error, resetsAt, droppedOnEnd(final)],
+        [run.id, final.status, error, resetsAt, droppedOnEnd(final), state.rows[0].told],
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent, final);
+      const followed =
+        next === null ? followUpOf(null) : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config);
       return {
         ended,
-        followed:
-          next === null
-            ? followUpOf(null)
-            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config),
+        followed,
         interrupted: state.rows[0].interrupted !== null,
         reply: reply ? Number(reply.seq) : null,
         reminder,
+        // A told reply that posted nothing gives its whisper back to its owner (whispers/store.ts `afterTell`), last.
+        whisper: state.rows[0].told ? await afterTell(t, run.id, reply !== undefined, ELSEWHERE_OPEN_MAX) : null,
       };
     });
   }
@@ -1214,6 +1232,7 @@ export class DbAgentPort implements AgentPort {
     if (charged !== null) this.deps.realtime.pushChargedReply(charged.conversationId, charged.ownerId, charged.seq);
     for (const a of recovered.runs) this.announce(a);
     this.tell(recovered.told);
+    if (recovered.whisper) this.deps.realtime.pushWhisper(recovered.whisper.ownerId, toWireWhisper(recovered.whisper));
     return true;
   }
 }
@@ -1228,6 +1247,8 @@ interface Recorded {
   reply: number | null;
   /** The reminder about money its settlement recorded (metering/reminders.ts), its whisper to make once committed; null when none. */
   reminder: string | null;
+  /** A told reply's whisper its end changed (whispers/store.ts `afterTell`), to push to its owner; null when none. */
+  whisper: Whisper | null;
 }
 
 /**
@@ -1239,6 +1260,8 @@ interface Recovered {
   told: Told;
   /** The reply the run had posted, now charged (`Hub.pushChargedReply`); null when it posted none. */
   charged: { conversationId: string; ownerId: string; seq: number } | null;
+  /** A told reply's whisper its end changed (whispers/store.ts `afterTell`), to push to its owner; null when none. */
+  whisper: Whisper | null;
 }
 
 /** A run's flags as an attempt starts. */
@@ -1261,7 +1284,8 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * In the same transaction its hold is released by a settlement that costs nothing (whatever the upstream reported died
  * with the process: no tokens, all forgiven) — unless it already has its usage record: it is never settled twice. A
  * posted or cancelled run is followed up by the one rule (`followUpSeq`: queued, for the worker about to start); a
- * failed one is not, so nothing is called again on its own (spec 6.5) and a retry answers everything. Queued runs are
+ * failed one is not, so nothing is called again on its own (spec 6.5) and a retry answers everything — but a told reply's
+ * noted calls, which are followed up whatever it ended as (`keepsNothingNoted`). Queued runs are
  * left as they are. Nothing is pushed (no socket can be open yet): a client learns the state from `GET …/run`. A run
  * that cannot be recovered is logged and left for the stale-run sweep or the next start. Returns how many were
  * recovered. The same ending, while the service runs, is `DbAgentPort.releaseRun` (one transaction of `recoverRun`).
@@ -1320,20 +1344,25 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   const error = end.status === "failed" || end.status === "cancelled" ? (end.error ?? null) : null;
   const updated = await t.query<RunRow>(
     `update agent_runs as r set status = $2, error = $3, finished_at = now(),
-            pending_seq = case when $4::boolean then null else r.pending_seq end
+            pending_seq = case when $4::boolean or $5::boolean then null else r.pending_seq end,
+            call_seqs = case when $5::boolean then '{}' else r.call_seqs end
       where r.id = $1 returning ${RUN_COLUMNS}`,
-    [runId, end.status, error, droppedOnEnd(end)],
+    [runId, end.status, error, droppedOnEnd(end), state.told],
   );
-  if (reply === null) return { runs: [], told: noneTold(), charged: null };
+  if (reply === null) return { runs: [], told: noneTold(), charged: null, whisper: null };
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
-  const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
+  // A failed run is followed by nothing on its own (its retry answers everything) — but a told reply's noted calls, which
+  // were never part of what failed, are followed up at once (`keepsNothingNoted`).
+  const next = end.status !== "failed" || state.told ? followUpSeq(state, agent, end) : null;
   const { run: followed, ...told } =
     next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config);
   return {
     runs: followed ? [ended, followed] : [ended],
     told,
     charged: posted ? { conversationId, ownerId: agent.ownerId, seq: Number(posted.seq) } : null,
+    // A told reply that posted nothing gives its whisper back (whispers/store.ts `afterTell`), last.
+    whisper: state.told ? await afterTell(t, runId, posted !== undefined, ELSEWHERE_OPEN_MAX) : null,
   };
 }
 

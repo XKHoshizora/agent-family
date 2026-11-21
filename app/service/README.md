@@ -1431,7 +1431,8 @@ sent again.
 
 **WireWhisper**: `{"id", "conversationId", "agentId", "afterSeq": 42, "kind": "found_elsewhere" | "tools_off" | "memory" | "allowance",
 "text": "…", "actions": ["tell", "dismiss"], "status": "open" | "accepted" | "declined" | "expired", "createdAt",
-"detail"?: …}`. `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
+"revision": 0, "detail"?: …}`. `revision` is raised by one at every change of its status (an answer, an expiry, a
+reopening, below): of two copies a client holds the one with the higher (a copy read before a change never undoes it). `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
 `detail` what its kind keeps with it, when it has any: at most 8 192 bytes of JSON (utf-8), nested at most 6 deep, at most
 200 values; no string in a whisper holds U+0000 or a lone surrogate (the service makes no whisper whose body breaks one of
 these, and logs only its kind). An open whisper is answered once; it expires — `status: "expired"`, pushed to its owner —
@@ -1475,9 +1476,20 @@ check with a live model). A told reply takes on no call: a member's call while i
 (`pending_seq`, and the call recorded in its `call_seqs`, which hold nothing else), never folded in, and it is shown the
 group only up to what it covers; its follow-up then answers exactly the calls recorded so — a mention refused as it was
 sent is none of them, whatever has changed since — as an ordinary reply: with tools, in the caller's lane, each held to
-the block rule as any follow-up's calls. A retry of a told reply that failed keeps its whisper, and
-tells again what it covered; what was noted on it stays noted on the retry, for the retry's follow-up — so a told reply
-that recovery or a release ended (failed: nothing follows it on its own) loses no member's call once you retry it. It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
+the block rule as any follow-up's calls. Those calls are never held to you: however the told reply ends — posted or
+not, failed as it ran, ended by recovery, a release or the stale-run sweep (where a failed run is otherwise followed by
+nothing) — they go to that follow-up at once, and the told reply keeps none of them. A tell is never lost: when a told reply ends having posted nothing — it failed, recovery, a release or the stale-run
+sweep ended it, you stopped it (queued or under way), or your pause cancelled it — its whisper goes back to `open`
+(`revision` raised, pushed to you alone: no frame, count or key reaches anyone else), with its hits and both buttons, so
+`告诉他们` tells once more (a fresh told reply) or `不用` declines (`whispers/store.ts` `afterTell`). Not when it posted (it
+stays `accepted`; one open again since, its run retried, is answered again when that posts), nor when you or the Agent
+are no longer in the group, the Agent is deleted, or you have 3 `found_elsewhere` whispers open there already (a reopened
+one counts); once reopened, any other ending of it changes nothing. Stopping a told reply while it is queued ends the
+tell only: the members' calls noted on it still get their ordinary follow-up. (`让 Agent 停下`, a group member's halt, does
+not touch a told reply at all — it is your own, a person's call: it ends the runs Agents' messages called for and the
+replies nobody asked for, and a follow-up of noted calls that only Agents' messages made is such a run.) A retry of a told
+reply that failed keeps its whisper, and tells again what it covered, with nothing noted; it is offered while the told
+reply is the Agent's latest run there. It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
 `busy_run` (a reply of it queued or running there), 429 `rate_limited` (your own replies a minute) — each leaves the
 whisper open, to answer again. `不用` (decline) does nothing more. Vault notes are not involved: hits are messages.
 `tools_off` — a reply found its provider model unable to use tools and the model was marked so
@@ -2012,9 +2024,11 @@ cannot be opened, the model is off the provider's list or no longer on the site;
   gave it up (one you gave up is yours to take back). The handle you leave is yours for good. Everything that shows
   handles follows at once — yours, and your Agents' full ones (`<handle>.<name part>`) — and is pushed (`principal`, with
   the new `handle`) to whoever can see you or each of your Agents, as an avatar change is; your own clients also get an
-  `agent` push per Agent. A mention by an old handle calls nobody; messages keep their text. With a memory setting in the
-  same body, your row (`principals`, the handle's) is locked before your account's (the settings), the order a send of
-  yours keeps (its message holds your row, then a mention your account), so the two never wait for each other in a circle.
+  `agent` push per Agent. A mention by an old handle calls nobody; messages keep their text. The change locks your row
+  (`principals`) only as an update that changes no key does (`for no key update`: the handle's unique index is partial and
+  no foreign key points at it), so no foreign key's check on your row — a send of yours, the settlement of your reply, a
+  run queued for you — ever waits for it; with a memory setting in the same body (your account's row) nothing can wait
+  in a circle, whichever order those take your row and your account in.
 - Body: `displayName`, `newNotes` (`"auto"`, `"vault"` or `"open"`: what notes written from now on do about the vault;
   existing notes do not move) and `memoryModel` (`null` clears it; else a model as an Agent's `model` is written, checked as
   Agent creation checks it: a site model that is configured and of the free tier (memory the site pays for runs only on its free
@@ -2416,10 +2430,13 @@ else of the Agent ever does. The member list (`GET /api/conversations/:id/member
   "kind": "text" | "file" | "system",
   "text": "…",                         // the message; a file message's caption ("" when none); a notice's sentence
   "attachment": { "id": "…", "name": "报告.pdf", "size": 1234, "inline": false },   // file messages only
-  "replyTo": { "seq": 40, "visible": true, "senderId": "…", "text": "<first 200 characters>",
+  "replyTo": { "seq": 40, "visible": true, "senderId": "…", "senderKind": "human" | "agent", "text": "<first 200 characters>",
                "kind": "text" | "file", "attachmentName": "…" /* quoted file messages only */ },
                                        // or { "seq": 7, "visible": false } when you cannot see the quoted message;
-                                       // absent when not a reply. A quoted notice: kind "text", senderId null
+                                       // absent when not a reply. A quoted notice: kind "text", senderId null, no
+                                       // senderKind. senderKind says whether a person or an Agent wrote it (a client
+                                       // shows an Agent's quoted text without its citations, 〔m3〕, whether or not
+                                       // it holds that Agent); a search hit's sender's is in its answer's principals
   "system": { "event": "member_joined", "actorId": "…", "principalId": "…" },   // system notices only
   "mentions": [{ "id": "…", "start": 0, "length": 7 }],   // who its mentions mean, as decided when it was sent
                                        // (Mentions): ranges of "text" in UTF-16 code units, ascending; to every reader;
@@ -2878,7 +2895,11 @@ reply with a large hold is not passed for ever by smaller ones; which source a q
 admission's own rule on what its owner has now; a free-tier reply held back with nothing left of either source after the
 holds waits on both, `held_back_on` `any`, and holds back the younger replies either would pay); a reply on the owner's own
 provider key, or one the other source would pay, never waits behind it, nor does the owner's own reply (lane `own`)
-behind a reply someone else called for, which the others' lanes may keep queued. Claimed again, its owner is told it is running (the other members of a group, who were told it
+behind a reply someone else called for, which the others' lanes may keep queued. What first come, first served promises,
+exactly: among one payer's replies paid from one source, a reply once held back is admitted before any younger one; two
+replies that reach admission together — claimed in one go, their first steps run side by side — are admitted in whichever
+order their transactions take the owner's account lock, the younger possibly first (the other is then held back, and marked).
+Claimed again, its owner is told it is running (the other members of a group, who were told it
 is replying, are told nothing more), and its wait is not logged again; each claim starts the run's in-process flags
 afresh, and nothing of an attempt that was held back (its end, its flags) touches the next. The worker is woken after a
 trigger commits, after every run it has worked on ends (so a held-back reply is claimed as the reply it waited for
@@ -3168,13 +3189,16 @@ and held to the cap by cutting whole lines from the top section downwards (a sec
 never in the middle of a line. Only then are its labels looked at, so that a citation can neither hide a label nor make
 one (`主〔m1〕人（…）`, `（〔f2〕@…）`). In a group every speaker label in it must be one the system wrote: a line in which a
 `主人（` does not start the owner's label exactly, or a `（@` is not the handle of a label standing whole there — the owner's
-inside `主人（…）`, or that of anyone else with a message the pair could cover, by their names now — is dropped (an unknown or
+inside `主人（…）`, or that of anyone else with a message the pair could cover, by their names as the call's input wrote
+them (read in one snapshot with the input, before the call: a rename while it runs drops nothing) — is dropped (an unknown or
 altered label, the owner's name and handle without `主人（…）`, a half-width bracket; counted `summary_label_dropped`), so no
 line of it can put words under an owner's label the system did not write. A stored summary is held to the same rule as it
 is read, for a reply's passage and for the old summary a job builds on (`shownSummary`): its citations taken out, then, in
 a group, its labels rewritten as the accounts they recorded are labelled now (*Renames*, below) and every line whose labels
-are not ones the pair may hold now left out of what is shown (the row itself is not rewritten) — so a row stored before
-this rule cannot show a forged label either. An answer with nothing left but section headings
+are not ones of those accounts now (or the owner's) left out of what is shown (the row itself is not rewritten). A reply
+reads it once, however many times its context is planned (`readPairSummary`, in `begin`'s first step under the
+conversation's row, which its job writes under: one read of the row and two indexed reads, nothing of the conversation's
+history). An answer with nothing left but section headings
 is no summary, first or not: nothing is stored and the messages are not swallowed. It is stored with the new `upto_seq` (`from_seq` stays where the first summary began) only
 when it weighs less than what it replaces — the old summary and the messages it now covers — and only when, under the
 conversation's row and then the Agent's (the order a reply takes them in), the pair is as the job read it: the Agent not
@@ -3203,9 +3227,11 @@ conversation or of a topic), until a reply is left out after them.
 owner's `主人（…）` among them). A rename — a person's name or handle, or an owner's handle, which every one of their Agents'
 full handles follows — changes how an account is labelled, not who it is: wherever the summary is read (a reply's passage,
 the old summary a job builds on: `shownSummary`), each label it recorded is first rewritten to how that account is
-labelled now, as the roster labels it, and only then held to the labels of now; so no line of a renamed person goes. A row
-stored before migration 056 records nobody: it is held to the labels of now as it is, and a line of someone renamed since
-is not shown (nor, then, kept by the next update).
+labelled now, as the roster labels it, and only then held to the labels of now; so no line of a renamed person goes. A
+group's summary stored before this version (migration 056) records nobody: no reply is shown it — the conversation part is
+read as if there were none, while what it covers still counts as summarised — until its next update, which builds on it as
+the labels of now allow (a line of someone renamed since goes; this reads the stay's history, in the job, never on a reply's
+path) and records whose its labels are: summaries stored before this version reappear after their next update.
 
 **Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
 `tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox:

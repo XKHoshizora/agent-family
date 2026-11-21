@@ -17,6 +17,8 @@ export interface WireWhisper {
   actions: WhisperAction[];
   status: WhisperStatus;
   createdAt: string;
+  /** Raised at every change of its status (migration 057): of two copies, a client keeps the one with the higher. */
+  revision: number;
   detail?: unknown;
 }
 
@@ -30,6 +32,7 @@ export const wireWhisperSchema = z.object({
   actions: z.array(z.enum(WHISPER_ACTIONS)),
   status: z.enum(WHISPER_STATUSES),
   createdAt: z.string(),
+  revision: z.number(),
   detail: z.unknown().optional(),
 });
 
@@ -43,5 +46,6 @@ export const toWireWhisper = (w: Whisper): WireWhisper => ({
   actions: [...w.body.actions],
   status: w.status,
   createdAt: w.createdAt.toISOString(),
+  revision: w.revision,
   ...(w.body.detail === undefined ? {} : { detail: w.body.detail }),
 });

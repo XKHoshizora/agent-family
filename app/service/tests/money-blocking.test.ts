@@ -282,10 +282,14 @@ describe("the holds of one owner's replies are capped together by queueing, not 
     const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
     await grant(db, owner.id, 6n * POINT);
     await say(owner, a.conv, "你好");
-    await say(owner, b.conv, "你好");
     worker.start();
     try {
+      // Ann's reply admitted and at its call before Bob's is sent: two replies claimed in one go are admitted in whichever
+      // order their transactions reach the owner's account (nothing promises the older one first; the mark orders them
+      // only once one was held back), so the order this test is about is made, not hoped for.
       await first.reached;
+      await say(owner, b.conv, "你好");
+      worker.wake();
       await vi.waitFor(async () => expect(await runIn(b.conv)).toMatchObject({ status: "queued", held_back_by: [(await runIn(a.conv)).id] }), { timeout: 5_000 });
       first.release("一。", { usage: U(0, 1000) });
       await vi.waitFor(async () => expect(await runIn(b.conv)).toMatchObject({ status: "done" }), { timeout: 5_000 });
@@ -659,7 +663,7 @@ describe("fix round 1: spend clamped to what was held, a requeued attempt that c
     const again = (await two.claimNext())!;
     expect(again.id).toBe(bob.id);
     // …the stop's transaction sees it running, and the route tells a port that is not working on it…
-    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
+    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id, app.deps.config))).toMatchObject({ stopped: null, running: true });
     port.stopAsked(bob.id);
     expect(await runIn(b.conv)).toMatchObject({ status: "running" });
     // …and the attempt ends stopped all the same: never admitted, never left to run later.
@@ -985,7 +989,7 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
     expect(isRunEnd(await port.begin(ann))).toBe(false);
     const bob = (await port.claimNext())!;
     // The stop's transaction sees it running; the route has not told the port yet.
-    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
+    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id, app.deps.config))).toMatchObject({ stopped: null, running: true });
     expect(await port.begin(bob)).toEqual({ status: "stopped" });
     await port.finish(bob, { status: "stopped" }, null, NOTHING);
     expect(await runIn(b.conv)).toMatchObject({ status: "stopped", hold: "0", held_back_by: null });

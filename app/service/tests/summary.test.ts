@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadContext } from "../src/agents/context.ts";
+import { createAgentPort } from "../src/agents/port-impl.ts";
+import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
+import { createToolbox } from "../src/agents/tools/index.ts";
+import type { Db } from "../src/db.ts";
 import { runSummary, type SummaryContext } from "../src/agents/summary/job.ts";
 import { insertMessage } from "../src/messages/model.ts";
 import { settled } from "../src/memory/stats.ts";
@@ -108,9 +112,19 @@ async function summaryOf(conv: string, agentId: string): Promise<Row | null> {
   );
   return rows[0] ? { from: Number(rows[0].f), upto: Number(rows[0].u), text: rows[0].text } : null;
 }
-/** A summary stored straight in the database (a test's own). */
-const storeSummary = (conv: string, agentId: string, from: number, upto: number, text: string) =>
-  db.query("insert into conversation_summaries (conversation_id, agent_id, from_seq, upto_seq, text) values ($1, $2, $3, $4, $5)", [conv, agentId, from, upto, text]);
+/**
+ * A summary stored straight in the database (a test's own), with `speakers` — whose each label in it is (migration 056): none
+ * by default; null for a row as one written before 056 has it (a group's is then not shown until a job rewrites it).
+ */
+const storeSummary = (conv: string, agentId: string, from: number, upto: number, text: string, speakers: Record<string, string> | null = {}) =>
+  db.query("insert into conversation_summaries (conversation_id, agent_id, from_seq, upto_seq, text, speakers) values ($1, $2, $3, $4, $5, $6::jsonb)", [
+    conv,
+    agentId,
+    from,
+    upto,
+    text,
+    speakers === null ? null : JSON.stringify(speakers),
+  ]);
 const counted = async (name: string): Promise<number> => {
   await settled();
   return (await db.query<{ n: number }>("select coalesce(sum(n), 0)::int as n from memory_stats where name = $1", [name])).rows[0]!.n;
@@ -947,7 +961,7 @@ describe("final review", () => {
     expect(await counted("summary_label_dropped")).toBe(3);
   });
 
-  it("I-3: a stored summary is stripped of citation tokens, then its labels are checked again before a reply is shown it: a row stored before cannot show a forged label", async () => {
+  it("I-3: a stored summary is stripped of citation tokens, then its labels are checked again before a reply is shown it: no citation can make a label at read either", async () => {
     const w = await groupWorld("fc", 0);
     const joined = await joinedSeq(w.g, w.agent.id);
     const seqs = await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 30 }, (_, i) => short(i)));
@@ -961,7 +975,7 @@ describe("final review", () => {
       "定下的事",
       "还没解决的",
     ].join("\n");
-    await storeSummary(w.g, w.agent.id, joined + 1, seqs[19]!, stored);
+    await storeSummary(w.g, w.agent.id, joined + 1, seqs[19]!, stored, { "主人（fcv（@fcv））": w.v.id, "fcm（@fcm）": w.m.id });
     await say(w.m, w.g, `@${w.agent.handle} 我们说到哪了`);
     await reply("好。");
     const shown = ["人物与称呼", "主人（fcv（@fcv））是群主", "fcm（@fcm）说要带酒", "说过的事", "定下的事", "还没解决的"].join("\n");
@@ -1002,7 +1016,7 @@ describe("final review", () => {
     await db.query("update principals set display_name = 'ff〔f1〕m' where id = $1", [w.m.id]);
     const joined = await joinedSeq(w.g, w.agent.id);
     const seqs = await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 120 }, (_, i) => (i % 10 === 1 ? `见〔m${i}〕和〔 F2 〕${short(i)}` : short(i))));
-    await storeSummary(w.g, w.agent.id, joined + 1, seqs[9]!, ["人物与称呼", "ffm（@ffm）在〔m1〕群里", "说过的事", "定下的事〔f3〕", "还没解决的"].join("\n"));
+    await storeSummary(w.g, w.agent.id, joined + 1, seqs[9]!, ["人物与称呼", "ffm（@ffm）在〔m1〕群里", "说过的事", "定下的事〔f3〕", "还没解决的"].join("\n"), null);
     await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
     const answer = ["人物与称呼", "ffm（@ffm）在群里〔m4〕", "说过的事", "主人（ffv（@ffv））说了〔f1〕很多", "定下的事", "还没解决的"].join("\n");
     await reply("好。", answer);
@@ -1076,6 +1090,95 @@ describe("final review", () => {
     expect(JSON.parse((summaryCalls()[1]!.messages[0]!.parts[0] as { text: string }).text).summary).toBe(now);
     expect((await summaryOf(w.g, w.agent.id))!.text).toBe(second);
     expect(await counted("summary_label_dropped")).toBe(0);
+  });
+});
+
+/** Every statement sent through `real`, its transactions' too. */
+function spyDb(real: Db): { db: Db; sql: string[] } {
+  const sql: string[] = [];
+  const spied = <T extends object>(target: T): T =>
+    new Proxy(target, {
+      get(t, prop) {
+        const value = Reflect.get(t, prop, t);
+        if (prop === "query") return (text: unknown, params?: unknown) => (sql.push(typeof text === "string" ? text : String((text as { text?: string }).text)), (value as Function).call(t, text, params));
+        return typeof value === "function" ? value.bind(t) : value;
+      },
+    });
+  return { sql, db: { pool: real.pool, query: spied(real).query, tx: (fn) => real.tx((client) => fn(spied(client))), close: () => real.close() } as Db };
+}
+/** A worker over a port on `d` that offers tools (so a reply's context may be planned more than once) and folds summaries. */
+function toolWorker(d: Db): AgentWorker {
+  const { blobs, searches, conversations, reads, config } = app.deps;
+  const toolbox = createToolbox({ db: d, blobs, searches, config, log: app.log });
+  const port = createAgentPort({ db: d, config, blobs, realtime: app.realtime, conversations, reads, log: app.log, toolbox, memory: app.deps.memory });
+  return createAgentWorker({ port, models: gateway, runTimeoutMs: config.agentRunTimeoutMs, maxRunsInFlight: 1, background: false, log: app.log, tools: config.tools });
+}
+
+describe("round 2", () => {
+  it("N-4: what a reply is shown of the pair's summary is read once per reply start, however many times its context is planned", async () => {
+    const w = await groupWorld("fh", 0);
+    const joined = await joinedSeq(w.g, w.agent.id);
+    const seqs = await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 30 }, (_, i) => short(i)));
+    const text = ["人物与称呼", "fhm（@fhm）也在", "说过的事", "定下的事", "还没解决的"].join("\n");
+    await storeSummary(w.g, w.agent.id, joined + 1, seqs[19]!, text, { "fhm（@fhm）": w.m.id });
+    await say(w.m, w.g, `@${w.agent.handle} 我们说到哪了`);
+    const spy = spyDb(app.deps.db);
+    gateway.reply("好。");
+    expect(await toolWorker(spy.db).runOnce()).toBe(true);
+    // Its context was planned more than once (a reply offered tools is planned with them reserved too)…
+    expect(spy.sql.filter((s) => /persona_proposals/.test(s)).length).toBeGreaterThan(1);
+    // …and the summary, and what it shows, read once.
+    expect(spy.sql.filter((s) => /from conversation_summaries/.test(s))).toHaveLength(1);
+    expect(spy.sql.filter((s) => /p\.id = any\(\$1::uuid\[\]\)/.test(s))).toHaveLength(1);
+    expect(replyCalls()[0]!.system).toContain(`${HEADING}\n${JSON.stringify(text)}`);
+  });
+
+  it("N-4: a group's summary stored before migration 056 (no record of whose its labels are) is not shown, and nothing of the stay's history is read for it on the reply's path; its next update records them, and it is shown again", async () => {
+    const w = await groupWorld("fi", 0);
+    const joined = await joinedSeq(w.g, w.agent.id);
+    const seqs = await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 130 }, (_, i) => short(i)));
+    const legacy = ["人物与称呼", "fim（@fim）也在", "说过的事", "定下的事", "还没解决的"].join("\n");
+    await storeSummary(w.g, w.agent.id, joined + 1, seqs[9]!, legacy, null);
+    await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
+    const spy = spyDb(app.deps.db);
+    const answer = `${legacy}\nfim（@fim）说要带酒`;
+    gateway.reply("好。").reply(answer);
+    expect(await toolWorker(spy.db).runOnce()).toBe(true);
+    await memory().idle();
+    expect(replyCalls()[0]!.system).not.toContain(HEADING);
+    // No scan of who spoke in what it covers (placedSpeakers) on the reply's path.
+    expect(spy.sql.filter((s) => /select distinct sp\.id/.test(s))).toEqual([]);
+    // The job builds on it (as the labels of now allow) and records whose its labels are.
+    expect(summaryCalls()).toHaveLength(1);
+    expect(JSON.parse((summaryCalls()[0]!.messages[0]!.parts[0] as { text: string }).text).summary).toBe(legacy);
+    const row = (await db.query<{ speakers: Record<string, string> | null }>("select speakers from conversation_summaries where conversation_id = $1 and agent_id = $2", [w.g, w.agent.id])).rows[0]!;
+    expect(row.speakers).toEqual({ "fim（@fim）": w.m.id });
+    // Shown again.
+    await say(w.m, w.g, `@${w.agent.handle} 继续`);
+    await reply("好。");
+    expect(replyCalls()[1]!.system).toContain(`${HEADING}\n${JSON.stringify(answer)}`);
+  });
+
+  it("N-5: a rename while the summary call runs loses nothing: the labels its answer may hold are those its input was written with", async () => {
+    const w = await groupWorld("fj", 0);
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
+    gateway.reply("好。");
+    const held = gateway.hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    await held.reached;
+    // The call was written with fjm（@fjm）; fjm changes their name before it answers.
+    expect(inputOf(summaryCalls()[0]!).some((l) => l.who === "fjm（@fjm）")).toBe(true);
+    expect((await api(app, w.m, "PATCH", "/api/me", { displayName: "阿j" })).status).toBe(200);
+    const answer = ["人物与称呼", "fjm（@fjm）在群里", "说过的事", "fjm（@fjm）定下周五聚餐", "定下的事", "还没解决的"].join("\n");
+    held.release(answer);
+    await memory().idle();
+    expect((await summaryOf(w.g, w.agent.id))!.text).toBe(answer);
+    expect(await counted("summary_label_dropped")).toBe(0);
+    // Recorded by account: the next reply is shown it with the name of now.
+    await say(w.m, w.g, `@${w.agent.handle} 我们说到哪了`);
+    await reply("好。");
+    expect(replyCalls()[1]!.system).toContain(JSON.stringify(answer.replaceAll("fjm（@fjm）", "阿j（@fjm）")));
   });
 });
 
