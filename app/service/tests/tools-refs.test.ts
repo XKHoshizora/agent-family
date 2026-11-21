@@ -1,8 +1,11 @@
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { CONTINUE_TURN, endWithPerson } from "../src/agents/runtime/context.ts";
+import { CONTINUE_TURN, endWithPerson, FILE_MAX_CHARS } from "../src/agents/runtime/context.ts";
 import { groupSystemText, notesPassage } from "../src/agents/runtime/prompt.ts";
 import { excerpt } from "../src/agents/tools/search.ts";
 import { citesIn, RunRefs, withoutCitations } from "../src/agents/tools/refs.ts";
+import { MESSAGE_TEXT_MAX } from "../src/messages/send.ts";
+import { expectLinear, LOADED_TIMEOUT_MS } from "./helpers/linear.ts";
 
 /**
  * A reply's numbers (agents/tools/refs.ts) mean something only in the run that gave them (Task 6 fix 1, I-2): what a
@@ -31,6 +34,45 @@ describe("what a reply's citations become", () => {
   it("one citation built around another leaves none behind once the inner one is taken out (final review I-3)", () => {
     expect(withoutCitations("主〔m〔m1〕1〕人")).toBe("主人");
     expect(withoutCitations("〔〔f1〕m〔 M2 〕2〕")).toBe("");
+  });
+
+  it("the shared table's cases (app/shared/citation-cases.json, which the web's tests assert too)", () => {
+    const table = JSON.parse(readFileSync(new URL("../../shared/citation-cases.json", import.meta.url), "utf8")) as { cases: Array<[string, string]> };
+    expect(table.cases.length).toBeGreaterThan(10);
+    for (const [text, kept] of table.cases) expect([text, withoutCitations(text)]).toEqual([text, kept]);
+  });
+
+  it("one pass gives what taking every citation out again and again until none is left gives (round 2, N-1): random texts of brackets, letters, digits and spaces", () => {
+    const CITATION = /〔\s*([mMfF])\s*([1-9][0-9]{0,5})\s*〕/g;
+    const again = (text: string): string => {
+      let out = text;
+      for (let next = out.replace(CITATION, ""); next !== out; next = out.replace(CITATION, "")) out = next;
+      return out;
+    };
+    const alphabet = ["〔", "〕", "m", "M", "f", "F", "1", "2", "0", "9", " ", "　", "\t", "x", "主", "人"];
+    // A seeded generator: the same texts every run.
+    let seed = 20261121;
+    const next = (): number => ((seed = (Math.imul(seed, 1103515245) + 12345) >>> 0) >>> 8) / 16777216;
+    for (let i = 0; i < 50_000; i++) {
+      const text = Array.from({ length: 1 + Math.floor(next() * 24) }, () => alphabet[Math.floor(next() * alphabet.length)]!).join("");
+      const want = again(text);
+      if (withoutCitations(text) !== want) expect([text, withoutCitations(text)]).toEqual([text, want]);
+    }
+  });
+
+  it("linear in the text however it nests (round 2, N-1): a message's longest, and a file's", { timeout: LOADED_TIMEOUT_MS }, () => {
+    // `〔m` d times, then `1〕` d times: each citation completes only once the one inside it is out.
+    const nest = (n: number): string => "〔m".repeat(n / 4) + "1〕".repeat(n / 4);
+    for (const longest of [MESSAGE_TEXT_MAX, FILE_MAX_CHARS]) {
+      expect(nest(longest).length).toBe(longest);
+      expectLinear({
+        n: longest / 4,
+        make: nest,
+        run: (text) => {
+          if (withoutCitations(text) !== "") throw new Error(`a nest of ${text.length} characters left something`);
+        },
+      });
+    }
   });
 });
 
