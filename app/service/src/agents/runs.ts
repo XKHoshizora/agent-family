@@ -1530,7 +1530,8 @@ export async function retryRun(
  * called the failed one (`triggered_by` kept: one an Agent's message called for is still an Agent's, so a member's
  * halt still ends it), and its owner's own whoever's the failed one was (its owner asked again) — answering the same
  * questions as the failed one, so whose they were is kept too (`asker_ids`: the retry asks nothing new), and so are the
- * calls (`call_seqs`), and a told reply's whisper (`whisper_id`: it tells again). Not for an Agent that
+ * calls (`call_seqs`), and a told reply's whisper (`whisper_id`: it tells again — what it covered only, what was noted on
+ * it staying noted, `pending_seq` and `call_seqs`, for the retry's follow-up). Not for an Agent that
  * is not in the group now, nor for a run from before it last joined; a run a halt or the Agent's leaving cancelled
  * (`halted`, `agent_removed`) did not fail: 400 like any other; 409 `model_gone` as `retryRun`; 429 over the owner's own
  * `agentRunsPerMinute`. Lock order: the group's row → the Agent's → run rows → the owner's `accounts` row.
@@ -1555,11 +1556,22 @@ async function retryInGroup(
   }
   if (!(await modelUsable(t, config, agent))) throw new AppError(409, "model_gone");
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
-  const covering = latest.whisper_id !== null ? Number(latest.covers) : Number(latest.answers);
-  const queued = await queueRun(t, agent, conversationId, covering, latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
-  await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));
-  // A told reply (`告诉他们`, Task 8) is told again: the retry keeps its whisper, so it is shown the hits and offered no tools.
-  if (latest.whisper_id !== null) await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, latest.whisper_id]);
+  if (latest.whisper_id === null) {
+    const queued = await queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
+    await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));
+    return queued;
+  }
+  // A told reply (`告诉他们`, Task 8) is told again: the retry keeps its whisper, so it is shown the hits and offered no tools,
+  // covers what it covered and answers no call; what was noted on it — up to its `pending_seq`, the calls in its `call_seqs` —
+  // stays noted, for the retry's follow-up to answer (a told reply recovery or a release failed loses no member's call).
+  const queued = await queueRun(t, agent, conversationId, covers, latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
+  const answers = Number(latest.answers);
+  await t.query("update agent_runs set whisper_id = $2, call_seqs = $3::bigint[], pending_seq = $4 where id = $1", [
+    queued.run.id,
+    latest.whisper_id,
+    (latest.calls ?? []).map(Number),
+    answers > covers ? answers : null,
+  ]);
   return queued;
 }
 

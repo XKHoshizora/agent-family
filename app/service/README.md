@@ -1475,7 +1475,8 @@ check with a live model). A told reply takes on no call: a member's call while i
 group only up to what it covers; its follow-up then answers exactly the calls recorded so — a mention refused as it was
 sent is none of them, whatever has changed since — as an ordinary reply: with tools, in the caller's lane, each held to
 the block rule as any follow-up's calls. A retry of a told reply that failed keeps its whisper, and
-tells again (what it covers, not what was noted on it). It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
+tells again what it covered; what was noted on it stays noted on the retry, for the retry's follow-up — so a told reply
+that recovery or a release ended (failed: nothing follows it on its own) loses no member's call once you retry it. It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
 `busy_run` (a reply of it queued or running there), 429 `rate_limited` (your own replies a minute) — each leaves the
 whisper open, to answer again. `不用` (decline) does nothing more. Vault notes are not involved: hits are messages.
 `tools_off` — a reply found its provider model unable to use tools and the model was marked so
