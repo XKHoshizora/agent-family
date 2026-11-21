@@ -6,7 +6,7 @@ import { currentMembership, lockForWrite, peekConversation, type ConversationTyp
 import { appendSystem } from "../conversations/system.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
-import type { StoredMessage, SystemEvent } from "../messages/model.ts";
+import { notAcknowledgement, type StoredMessage, type SystemEvent } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
@@ -1048,9 +1048,9 @@ export async function triggerFromAgent(
     return recorded(noneTriggered());
   }
   const limit = config.agentChainLimit;
-  // Every message after a person's latest that is not a notice is an Agent's.
+  // Every message after a person's latest that is not a notice is an Agent's; an acknowledgement is no Agent's turn.
   const inARow = await t.query<{ n: number }>(
-    `select count(*)::int as n from (select 1 from messages where conversation_id = $1 and seq > $2 and kind <> 'system' limit $3) x`,
+    `select count(*)::int as n from (select 1 from messages m where m.conversation_id = $1 and m.seq > $2 and m.kind <> 'system' and ${notAcknowledgement("m")} limit $3) x`,
     [conversationId, human, limit],
   );
   if (inARow.rows[0]!.n >= limit) {
@@ -1156,14 +1156,15 @@ export async function followUp(
   // posted it (`postingRun`) unless that run is its owner's own (or there is none: the owner). A message does not count
   // when it was refused for this Agent when it was posted (`refused_agent_calls`), nor when there is a block, either way,
   // between the Agent's owner and the sender or the sending Agent's owner, or the person behind it (nobody behind it
-  // matches no block).
+  // matches no block), nor when it is an Agent's acknowledgement: it calls nobody (`notAcknowledgement`; whom the
+  // follow-up hears from, `heardIn` below, still counts it).
   const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; sender_id: string; caller_id: string | null; text: string | null; askers: string[] | null }>(
     `select m.seq::text as seq, p.kind, m.sender_id, m.body ->> 'text' as text, bh.caller_id, r.asker_ids as askers
        from messages m
        join principals p on p.id = m.sender_id
        left join agent_runs r on p.kind = 'agent' and ${postingRun("m", "r")}
        cross join lateral (select ${behindMessageSql("p", "r")} as caller_id) bh
-      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5
+      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5 and ${notAcknowledgement("m")}
         and not exists (select 1 from refused_agent_calls x where x.conversation_id = m.conversation_id and x.seq = m.seq and x.agent_id = $5)
         and not ${blockedEitherWay("$4::uuid", "coalesce(p.owner_id, p.id), bh.caller_id")}
       order by m.seq`,

@@ -1,6 +1,6 @@
 import { VISIBLE_JOIN, type ConversationType } from "../conversations/store.ts";
 import type { Db, Tx } from "../db.ts";
-import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "../messages/model.ts";
+import { MESSAGE_COLUMNS, notAcknowledgement, toStored, type MessageRow, type StoredMessage, type WireMessage } from "../messages/model.ts";
 import { mentionedIn, readPrincipals, type SyncPrincipal } from "../messages/principals.ts";
 import { toWireFor, type ReadConfig } from "../messages/read.ts";
 import { canDirectSendMany, type DirectRefusal } from "../social/relations.ts";
@@ -115,7 +115,7 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
             pair.peer_id, peer.read_seq as peer_read_seq,
             ac.agent_id, ag.paused as agent_paused, ag.deleted_at is not null as agent_deleted, agm.read_seq as agent_read_seq,
             (select count(*) from messages m ${VISIBLE_JOIN}
-              where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1) as unread,
+              where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1 and ${notAcknowledgement("m")}) as unread,
             -- The caller's own open whispers there that wait for an answer (offer a button), and nobody else's (owner_id is the reader).
             (select count(*) from whispers w
               where w.owner_id = $1 and w.conversation_id = c.id and w.status = 'open' and jsonb_array_length(w.body -> 'actions') > 0) as whispers

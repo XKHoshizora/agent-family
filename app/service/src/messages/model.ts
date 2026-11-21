@@ -113,6 +113,14 @@ export interface StoredMessage {
 /** Columns of `messages m` in the shape `toStored` reads. */
 export const MESSAGE_COLUMNS = "m.id, m.conversation_id, m.seq, m.sender_id, m.kind, m.body, m.client_txn, m.created_at";
 
+/**
+ * SQL: message `m` (a `messages` alias, spliced in) is not an Agent's acknowledgement (`body.ack`, "先应一声、再交付"). An
+ * acknowledgement is the Agent's message for whom its run heard from and the late-joiner line, but it calls nobody, is
+ * no Agent's turn in a chain, adds nothing to unread and is nothing to remember (the controller's rulings, Task 6 fix 1):
+ * every reader of those leaves it out with this.
+ */
+export const notAcknowledgement = (m: string): string => `(${m}.body -> 'ack') is distinct from 'true'::jsonb`;
+
 export interface MessageRow {
   id: string;
   conversation_id: string;

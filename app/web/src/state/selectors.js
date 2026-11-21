@@ -59,12 +59,13 @@ export function publishBlock(state, conv) {
 }
 
 /**
- * The chat list's one line for a conversation: its newest message. An Agent's text is Markdown: its markers are taken
- * out (ui/markdownPreview.js); a person's text is shown as written.
+ * The chat list's one line for a conversation: its newest message — never an Agent's acknowledgement (`ack`: the answer
+ * after it is). An Agent's text is Markdown: its markers are taken out (ui/markdownPreview.js); a person's text is shown
+ * as written.
  */
 export function lastPreview(state, conv) {
   // (A notice of an event this client does not know shows nothing: it is never the preview either.)
-  const shown = conv.messages.filter((x) => !x.hidden);
+  const shown = conv.messages.filter((x) => !x.hidden && !x.ack);
   const last = [...shown].reverse().find((x) => x.kind !== "system") || shown[shown.length - 1];
   if (!last) return "暂无消息";
   let body = last.kind !== "system" && isAgent(state, last.from) && typeof last.text === "string" ? previewOfMarkdown(last.text) : last.text;

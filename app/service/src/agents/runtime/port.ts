@@ -47,6 +47,11 @@ export interface ToolRun {
    * counted under in what the reply looked up (`Reply.lookups`). A tool not named shows nothing and counts nothing.
    */
   readonly kinds: Readonly<Record<string, Activity>>;
+  /**
+   * An acknowledgement already stands for what the reply answers — an earlier attempt at the same question posted one and
+   * never answered (a retry; agents/conversation.ts `standingAcknowledgement`) — so it posts none (worker.ts). Absent: false.
+   */
+  readonly acknowledged?: boolean;
   /** The model's context, in tokens. */
   readonly contextTokens: number;
   /** The images and PDFs the call shows, at their constants (metering/prices.ts): sent, and held, in every round. */

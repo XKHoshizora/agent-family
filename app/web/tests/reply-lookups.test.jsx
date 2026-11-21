@@ -102,6 +102,17 @@ describe("while a reply's tool runs", () => {
     expect(storedLi(4).querySelector(".bubble").textContent).toContain("叫蜀香。");
   });
 
+  it("an acknowledgement adds nothing to unread and is never the chat list's line; the answer is both", async () => {
+    const { transport } = await openChats({ open: "周末小组" });
+    const row = () => screen.getByText("小助手", { selector: ".list-col .row-name" }).closest(".row");
+    const badge = () => row().querySelector(".badge")?.textContent ?? null;
+    expect([row().querySelector(".row-preview").textContent, badge()]).toEqual(["在吗", null]);
+    await push(transport, { type: "message", message: wire(A1, 3, AG1, "我先查一下。", { ack: true }) });
+    expect([row().querySelector(".row-preview").textContent, badge()]).toEqual(["在吗", null]);
+    await push(transport, { type: "message", message: wire(A1, 4, AG1, "叫蜀香。") });
+    expect([row().querySelector(".row-preview").textContent, badge()]).toEqual(["叫蜀香。", "1"]);
+  });
+
   it("in a group someone's acknowledgement leaves their reply shown as being written, until the answer comes", async () => {
     const { transport } = await openChats({ open: "周末小组" });
     const rows = () => [...timeline().querySelectorAll("li.streaming")].map((li) => li.querySelector(".msg-meta strong").textContent);
@@ -263,6 +274,19 @@ describe("what a reply looked up", () => {
     await click(links[1]);
     expect(document.querySelector(".chat-head").textContent).toContain("周末小组");
     expect(storedLi(7).classList.contains("flash")).toBe(true);
+  });
+
+  it("a cited reply shown as plain text (too long to render, with the note) keeps its citations as links", async () => {
+    const cites = { m1: { conversationId: A1, seq: 2 } };
+    const long = `你问过〔m1〕。${"很长的一段话。".repeat(8000)}`;
+    await openChats({ messages: [...BASE, wire(A1, 3, AG1, long, { lookups: { search: 1 }, cites })] });
+    const bubble = storedLi(3).querySelector(".bubble");
+    expect(bubble.querySelector(".md-note")).not.toBeNull();
+    const links = [...bubble.querySelectorAll("sup.cite button")];
+    expect(links.map((b) => b.getAttribute("aria-label"))).toEqual(["引用 1"]);
+    expect(bubble.textContent.startsWith("你问过1。")).toBe(true);
+    await click(links[0]);
+    expect(storedLi(2).classList.contains("flash")).toBe(true);
   });
 
   it("closing the line hides the list again; in a group no words are shown, whatever a message carries", async () => {

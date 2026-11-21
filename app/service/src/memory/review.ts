@@ -1,6 +1,7 @@
 import type { Config } from "../config.ts";
 import { VISIBLE_JOIN } from "../conversations/store.ts";
 import type { Queryable } from "../db.ts";
+import { notAcknowledgement } from "../messages/model.ts";
 import { cleanText } from "./clean.ts";
 import { languageRule, type MemoryLanguage } from "./language.ts";
 import { getMemoryLanguage, listAgentNotes, listOwnerNotes, notesFor, roomOf, type Note, type NoteKind } from "./store.ts";
@@ -27,8 +28,11 @@ const ASKS_TO_FORGET =
 const ASKS_TO_LOCK = /锁起来|锁进保险箱|放进保险箱|别告诉别人|不要告诉别人|(?<![a-z])lock (?:it|this|that)\b|秘密にして/i;
 export const EXPLICIT = new RegExp([REMEMBER, ASKS_TO_FORGET, ASKS_TO_LOCK].map((r) => r.source).join("|"), "iu");
 
-/** What a message row (`m`) must be to be read at all: it has text, and is not a greeting the server wrote. */
-export const UNSPOKEN = "coalesce(m.body ->> 'text', '') <> '' and (m.body -> 'fixed') is distinct from 'true'::jsonb";
+/**
+ * What a message row (`m`) must be to be read at all: it has text, and is not a greeting the server wrote, nor an Agent's
+ * acknowledgement (`我先查一下。`: it says nothing worth remembering; the answer after it is read as any reply).
+ */
+export const UNSPOKEN = `coalesce(m.body ->> 'text', '') <> '' and (m.body -> 'fixed') is distinct from 'true'::jsonb and ${notAcknowledgement("m")}`;
 
 /** A note the review model can name (`n1`…): where it is, what it says and whether it is in the vault. */
 export interface RefNote {

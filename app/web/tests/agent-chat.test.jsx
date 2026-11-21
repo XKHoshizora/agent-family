@@ -1905,6 +1905,14 @@ describe("Agents in a group (batch 2C)", () => {
     expect(haltButton().disabled).toBe(false);
   });
 
+  it("让 Agent 停下 stays away for an Agent's acknowledgement naming another Agent: it calls nobody; its answer naming one does", async () => {
+    const { transport } = await openGroup([wire(G1, 1, ANN, "@annbot 查一下")]);
+    await push(transport, { type: "message", message: wire(G1, 2, OAG, "我问问 @helper 。", { ack: true }) });
+    expect(haltButton()).toBeNull();
+    await push(transport, { type: "message", message: wire(G1, 3, OAG, "@helper 你看看") });
+    expect(haltButton()).toBeTruthy();
+  });
+
   const EVERYWHERE = "换了以后，它在所有会话里都用这个模型";
   const optionNamed = (name) => [...document.querySelectorAll('.model-pop [role="option"]')].find((o) => o.querySelector(".model-name")?.textContent === name);
   const keepAgent = async (_id, patch) => agentOf(AG1, { model: SITE_FREE, paused: true, ...patch });

@@ -4,7 +4,7 @@ import type { Config } from "../config.ts";
 import type { Change } from "../conversations/events.ts";
 import { currentMembership } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
-import type { Tx } from "../db.ts";
+import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { citesOf, foundOf, lookupsOf, queriesOf, type LookupFields, type MessageRef } from "../messages/lookups.ts";
 import { acknowledgementTxn } from "../messages/read.ts";
@@ -219,7 +219,8 @@ export interface AgentReply extends LookupFields {
  * posting it again returns it), a body `{text, reasoning?, ack: true}` and nothing of what tools looked up; it calls
  * nobody (its mentions are not read). The reply posted after it (`as` "reply", the default) quotes the question it
  * answers (`replyToSeq`: the seq the run covers) when anyone but the Agent wrote a text or file message in the
- * conversation after the acknowledgement; otherwise it is posted as ever.
+ * conversation after the acknowledgement that stands for it (`standingAcknowledgement`: its own, or the one an earlier
+ * attempt at the same question left, a retry's); otherwise it is posted as ever.
  */
 export async function postAsAgent(
   t: Tx,
@@ -291,15 +292,19 @@ export async function postAsAgent(
     body.ack = true;
     return { message: await insertMessage(t, conversationId, agentId, "text", body, txn), duplicate: false, triggered: noneTriggered() };
   }
-  // Someone else wrote after its acknowledgement: the answer says which question it answers.
-  const overtaken = await t.query(
-    `select 1 from messages a
-       join messages m on m.conversation_id = a.conversation_id and m.seq > a.seq and m.sender_id <> a.sender_id and m.kind in ('text', 'file')
-      where a.conversation_id = $1 and a.sender_id = $2 and a.client_txn = $3
-      limit 1`,
-    [conversationId, agentId, acknowledgementTxn(runId)],
-  );
-  if (overtaken.rowCount !== 0) body.replyToSeq = Number(run.rows[0].covers);
+  // Someone else wrote after the acknowledgement that stands for it (its own, or an earlier attempt's: a retry's): the
+  // answer says which question it answers.
+  const standing = await standingAcknowledgement(t, conversationId, agentId, runId);
+  const overtaken =
+    standing !== null &&
+    (
+      await t.query("select 1 from messages m where m.conversation_id = $1 and m.seq > $2 and m.sender_id <> $3 and m.kind in ('text', 'file') limit 1", [
+        conversationId,
+        standing,
+        agentId,
+      ])
+    ).rowCount !== 0;
+  if (overtaken) body.replyToSeq = Number(run.rows[0].covers);
   // What its tools looked up: the counts, and the messages found (each reader is sent only those they can see,
   // messages/read.ts) — in a group only that group's own, the only ones a reply there may find; the search words only in
   // its own conversation, its owner's to read — in a group they are not kept.
@@ -327,6 +332,30 @@ export async function postAsAgent(
     ? noneTriggered()
     : await triggerFromAgent(t, conversationId, message, agent, postedBy, config, () => hearFrom(t, runId, covered, message.seq));
   return { message, duplicate: false, triggered };
+}
+
+/**
+ * The seq of the acknowledgement that stands for what run `runId` of Agent `agentId` answers in `conversationId`, or null:
+ * its own (`ack:<run id>`); else one an earlier run of that Agent there posted for the same question and never answered
+ * (no reply of that run's own) — the question an earlier run answered, its `covers_seq`, is this run's or one of the
+ * calls this run answers (`call_seqs`: a retry in a group answers the failed run's) — so that a retry of a reply that
+ * failed after acknowledging posts no second acknowledgement (Task 6 fix 1, m7). The latest when there are several.
+ */
+export async function standingAcknowledgement(q: Queryable, conversationId: string, agentId: string, runId: string): Promise<number | null> {
+  const { rows } = await q.query<{ seq: string }>(
+    `select a.seq::text as seq
+       from agent_runs me
+       join agent_runs r on r.agent_id = me.agent_id and r.conversation_id = me.conversation_id and r.purpose = 'reply'
+       join messages a on a.conversation_id = r.conversation_id and a.sender_id = r.agent_id and a.client_txn = 'ack:' || r.id::text
+      where me.id = $3 and me.agent_id = $2 and me.conversation_id = $1
+        and (r.id = me.id
+             or ((r.covers_seq = me.covers_seq or r.covers_seq = any(coalesce(me.call_seqs, '{}')))
+                 and not exists (select 1 from messages x where x.conversation_id = r.conversation_id and x.sender_id = r.agent_id and x.client_txn = r.id::text)))
+      order by a.seq desc
+      limit 1`,
+    [conversationId, agentId, runId],
+  );
+  return rows[0] ? Number(rows[0].seq) : null;
 }
 
 /**

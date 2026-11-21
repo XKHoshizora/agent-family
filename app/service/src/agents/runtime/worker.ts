@@ -490,7 +490,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * `AGENT_RUN_TIMEOUT_MS`) and the service closing are honoured between events, between tool calls and between rounds,
    * and end it as they end a reply of one call. Text and reasoning stream as they come, a later round's after a
    * paragraph break. What a round that calls tools has said by then, when it shows anything, is posted at once — before
-   * its tools run — as the reply's acknowledgement (`acknowledge`; one per reply, the first), and the answer is what the
+   * its tools run — as the reply's acknowledgement (`acknowledge`; one per reply, the first; none when an earlier
+   * attempt's stands, `ToolRun.acknowledged`), and the answer is what the
    * reply says after it; a later round's text before its calls is part of the answer. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
    * reported usage, or of its estimate when it reported none (the conversation's, plus the tools and the steps it carried,
    * at the model's ratio — no tools for a round whose upstream refused them; what it wrote, its calls included); a round
@@ -520,8 +521,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     /** The upstream refused a later round: the reply is asked for once more as one without tools (`prepared.call`). */
     let plain = false;
     let unusable = false;
-    /** The reply's acknowledgement was posted: no later round's text is. */
-    let acknowledged = false;
+    /** The reply's acknowledgement was posted, or an earlier attempt's stands (`ToolRun.acknowledged`): no later round's text is. */
+    let acknowledged = bounds.acknowledged === true;
     /** What the tools that ran looked up, for the reply's message. */
     const looked = new LookedUp();
     /** What the reply's status says now: the kind of the tool that is running, or nothing. */

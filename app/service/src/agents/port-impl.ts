@@ -11,10 +11,10 @@ import { assertCount, costMicro, isCount, type Price } from "../metering/prices.
 import { settle } from "../metering/settle.ts";
 import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS, TOOL_TEXT_FACTOR } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
-import { acknowledgementTxn, markRead, type ReadEvents } from "../messages/read.ts";
+import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
-import { citesIn, RunRefs } from "./tools/refs.ts";
+import { citesIn, RunRefs, withoutCitations } from "./tools/refs.ts";
 import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { markToolsOff } from "../providers/store.ts";
@@ -37,7 +37,7 @@ import {
 } from "./context.ts";
 import { contextBudget, holdsNewest } from "./runtime/context.ts";
 import { FINAL_LINE } from "./runtime/loop.ts";
-import { postAsAgent, type AgentReply } from "./conversation.ts";
+import { postAsAgent, standingAcknowledgement, type AgentReply } from "./conversation.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
 import {
@@ -622,6 +622,8 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
       const planned = planRatio(ratio);
+      // An acknowledgement already stands for what it answers (an earlier attempt's: a retry): it posts none.
+      const acknowledged = tools.length > 0 && (await standingAcknowledgement(t, run.conversationId, run.agentId, run.id)) !== null;
       return {
         prepared: {
           call: {
@@ -639,6 +641,7 @@ export class DbAgentPort implements AgentPort {
               : {
                   perTool: offer.perTool,
                   kinds: offer.kinds,
+                  acknowledged,
                   contextTokens: resolved.contextTokens,
                   fixedTokens: context.fixedTokens,
                   ratio,
@@ -796,11 +799,11 @@ export class DbAgentPort implements AgentPort {
   /**
    * `AgentPort.acknowledge`: what the reply said before it called a tool, posted at once as its acknowledgement
    * (`postAsAgent` "ack", in its own transaction), published after commit as any message of the Agent's — it calls
-   * nobody — and, in a group, dropping the proactive judgement waiting there as the Agent's reply would. Refused, or
-   * empty, as `post`.
+   * nobody — and, in a group, dropping the proactive judgement waiting there as the Agent's reply would. It cites
+   * nothing: every citation it writes is taken out (tools/refs.ts `withoutCitations`). Refused, or empty, as `post`.
    */
   acknowledge(run: RunTicket, said: { text: string; reasoning: string }): Promise<"posted" | "refused" | "empty"> {
-    return this.posting(run, { ...said, stopped: false, truncated: false }, "ack");
+    return this.posting(run, { ...said, text: withoutCitations(said.text), stopped: false, truncated: false }, "ack");
   }
 
   /** `post` and `acknowledge`: `postAsAgent` with the run's mark, announced after commit, its refusals told apart. */
@@ -866,9 +869,9 @@ export class DbAgentPort implements AgentPort {
     if (!result) return;
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
-    // A reply stands, or its acknowledgement does: the conversation may have something to remember (the reviewer never
-    // throws and reads for itself).
-    if (result.reply !== null || result.acknowledged) this.deps.memory?.noted(run.agentId, run.conversationId);
+    // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself).
+    // An acknowledgement alone is nothing to remember (memory/review.ts `UNSPOKEN`).
+    if (result.reply !== null) this.deps.memory?.noted(run.agentId, run.conversationId);
     if (result.followed.run) this.announce(result.followed.run);
     // A notice its follow-up appended (a chain budget or the others' daily budget spent): the group is told after the
     // run's end.
@@ -885,14 +888,15 @@ export class DbAgentPort implements AgentPort {
         const current = await t.query<RunRow>(`select ${RUN_COLUMNS} from agent_runs r where r.id = $1`, [run.id]);
         if (!current.rows[0]) return null;
         const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) };
-        return { ended, followed: followUpOf(null), interrupted: false, reply: null, acknowledged: false };
+        return { ended, followed: followUpOf(null), interrupted: false, reply: null };
       }
-      // Its reply, and its acknowledgement if it posted one (messages/read.ts `acknowledgementTxn`).
-      const said = await t.query<{ seq: string; ack: boolean }>(
-        "select seq::text, client_txn <> $3 as ack from messages where conversation_id = $1 and sender_id = $2 and client_txn in ($3, $4)",
-        [run.conversationId, run.agentId, run.id, acknowledgementTxn(run.id)],
-      );
-      const reply = said.rows.find((r) => !r.ack);
+      // Its reply (its acknowledgement, if it posted one, is not: `ack:<run id>`).
+      const said = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
+        run.conversationId,
+        run.agentId,
+        run.id,
+      ]);
+      const reply = said.rows[0];
       // A refused post of a run in a group whose Agent is no longer a member there ends `agent_removed` (looked up only
       // for a refusal nothing else explains).
       const refused = reply === undefined && state.rows[0].interrupted === null && end.status === "cancelled" && end.error === undefined;
@@ -915,7 +919,6 @@ export class DbAgentPort implements AgentPort {
         followed: next === null ? followUpOf(null) : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, config),
         interrupted: state.rows[0].interrupted !== null,
         reply: reply ? Number(reply.seq) : null,
-        acknowledged: said.rows.some((r) => r.ack),
       };
     });
   }
@@ -959,8 +962,6 @@ interface Recorded {
   interrupted: boolean;
   /** The seq of the reply the run posted, to push again to its owner now that it is charged; null when none. */
   reply: number | null;
-  /** Whether the run posted an acknowledgement (worker.ts: what it said before its tools ran). */
-  acknowledged: boolean;
 }
 
 /**

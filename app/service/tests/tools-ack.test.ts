@@ -7,6 +7,7 @@ import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway, type ScriptedGateway } from "./helpers/models.ts";
+import { UNSPOKEN } from "../src/memory/review.ts";
 import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
 
 /**
@@ -193,6 +194,106 @@ describe("an acknowledgement, then the answer", () => {
     expect(stopping.pending()).toBe(0);
     expect((await messages(own)).filter((m) => m.sender === agent.id).map((m) => m.body)).toEqual([{ text: "我先查一下。", ack: true }]);
     expect((await lastRun(agent.id, own)).status).toBe("stopped");
+  });
+
+  it("an acknowledgement naming an Agent is no call on any path: a later follow-up of that Agent does not count it, nor take its caller from it", async () => {
+    const [owner, mia, ned] = [await signUp(app, "owen"), await signUp(app, "mia"), await signUp(app, "ned")];
+    const a = await mustCreateAgent(app, owner, { handle: "owen_bot", name: "小助手", model: FAST, persona: "简短地回答。" });
+    const b = await mustCreateAgent(app, mia, { handle: "mia_bot", name: "米娅的助手", model: FAST, persona: "简短地回答。", groupMentions: "members" });
+    const g = await group(app, owner, "饭搭子", [mia, ned]);
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: a.id })).status).toBe(201);
+    expect((await api(app, mia, "POST", `/api/conversations/${g}/members`, { principalId: b.id })).status).toBe(201);
+    // B is called and its reply runs (held in its model call).
+    await say(mia, g, "@mia_bot 你好");
+    const bGateway = scriptedGateway();
+    const held = bGateway.hang();
+    const bRunning = toolWorker(bGateway).worker.runOnce();
+    await held.reached;
+    // Meanwhile A acknowledges naming B, then answers; and Ned calls B (noted on B's running reply).
+    await say(owner, g, "@owen_bot 查一下");
+    gateway.callTools([{ name: "search", input: { query: "x" } }], { text: "@mia_bot 你也帮我看看。" }).reply("查完了。");
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    const nedCall = await say(ned, g, "@mia_bot 还有一件事");
+    held.release("你好！");
+    expect(await bRunning).toBe(true);
+    // B's follow-up answers Ned's call only, and Ned is its caller.
+    const follow = (await db.query<{ caller_id: string | null; call_seqs: string[] }>("select caller_id, call_seqs::text[] from agent_runs where agent_id = $1 and status = 'queued'", [b.id])).rows;
+    expect(follow).toEqual([{ caller_id: ned.id, call_seqs: [String(nedCall)] }]);
+    expect(bGateway.pending()).toBe(0);
+    // At the mentions lane's merge: an acknowledgement is stored with no mentions, whatever the posting function keeps.
+    const ack = (await db.query<{ row: Record<string, unknown> }>("select to_jsonb(m) as row from messages m where m.sender_id = $1 and m.client_txn like 'ack:%'", [a.id])).rows;
+    expect(ack).toHaveLength(1);
+    const stored = ack[0]!.row;
+    expect([stored.mentions ?? null, (stored.body as Record<string, unknown>).mentions ?? null]).toSatisfy(([column, inBody]: unknown[]) => (column === null || (Array.isArray(column) && column.length === 0)) && inBody === null);
+  });
+
+  it("an acknowledgement is not counted toward the chain limit (AGENT_CHAIN_LIMIT): it is no Agent's turn", async () => {
+    const owner = await signUp(app, "owen");
+    const a = await mustCreateAgent(app, owner, { handle: "owen_bot", name: "小助手", model: FAST, persona: "简短地回答。" });
+    const b = await mustCreateAgent(app, owner, { handle: "owen_two", name: "小二", model: FAST, persona: "简短地回答。", groupMentions: "members" });
+    const g = await group(app, owner, "饭搭子", [await signUp(app, "mia"), await signUp(app, "ned")]);
+    for (const x of [a, b]) expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: x.id })).status).toBe(201);
+    await say(owner, g, "@owen_bot 查一下，再叫小二接着说");
+    const { db: pool, blobs, conversations, reads, config } = app.deps;
+    // A limit of 2: the acknowledgement and the answer would be two Agent messages in a row; only the answer counts.
+    const limited = { ...config, agentChainLimit: 2 };
+    const port = createAgentPort({ db: pool, config: limited, blobs, realtime: app.realtime, conversations, reads, log: app.log, toolbox });
+    const worker = createAgentWorker({ port, models: gateway, runTimeoutMs: config.agentRunTimeoutMs, maxRunsInFlight: 1, background: false, log: app.log, tools: config.tools });
+    gateway.callTools([{ name: "search", input: { query: "x" } }], { text: "我先查一下。" }).reply("@owen_two 你接着说。");
+    expect(await worker.runOnce()).toBe(true);
+    expect((await db.query("select 1 from agent_runs where agent_id = $1 and status = 'queued'", [b.id])).rowCount).toBe(1);
+    expect((await db.query("select 1 from messages where conversation_id = $1 and body ->> 'event' = 'agent_chain_paused'", [g])).rowCount).toBe(0);
+  });
+
+  it("an acknowledgement adds nothing to unread (the answer does), and memory reads nothing of it (UNSPOKEN)", async () => {
+    const { owner, agent, own } = await owned();
+    await say(owner, own, "查一下");
+    gateway.callTools([{ name: "search", input: { query: "x" } }], { text: "我先查一下。" }).reply("查到了。");
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    const entry = (await api(app, owner, "GET", `/api/conversations/${own}`)).json;
+    expect(entry.unread ?? entry.conversation?.unread).toBe(1);
+    const read = (await db.query<{ text: string }>(`select m.body ->> 'text' as text from messages m where m.conversation_id = $1 and m.sender_id = $2 and ${UNSPOKEN} order by m.seq`, [own, agent.id])).rows;
+    expect(read.map((r) => r.text)).toEqual(["查到了。"]);
+  });
+
+  it("a retry of an acknowledged reply that failed posts no second acknowledgement: the earlier one stands, and the answer replies to the question when someone spoke after it", async () => {
+    const [owner, mia, ned] = [await signUp(app, "owen"), await signUp(app, "mia"), await signUp(app, "ned")];
+    const agent = await mustCreateAgent(app, owner, { handle: "owen_bot", name: "小助手", model: FAST, persona: "简短地回答。" });
+    const g = await group(app, owner, "饭搭子", [mia, ned]);
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    const call = await say(mia, g, "@owen_bot 川菜馆叫什么？");
+    gateway.callTools([{ name: "search", input: { query: "川菜馆" } }], { text: "我查查。" }).fail("provider_unavailable", { status: 502 });
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    expect((await lastRun(agent.id, g)).status).toBe("failed");
+    await say(ned, g, "我也想知道");
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/runs/retry`, { agentId: agent.id })).status).toBe(201);
+    gateway.callTools([{ name: "search", input: { query: "川菜馆" } }], { text: "我再查查。" }).reply("叫蜀香。");
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    const mine = (await messages(g)).filter((m) => m.sender === agent.id).map((m) => m.body);
+    expect(mine).toEqual([
+      { text: "我查查。", ack: true },
+      { text: "我再查查。\n\n叫蜀香。", lookups: { search: 1 }, replyToSeq: call },
+    ]);
+    // A reply to a new question acknowledges again (the earlier acknowledgement stood for the old one).
+    await say(mia, g, "@owen_bot 那几点关门？");
+    gateway.callTools([{ name: "search", input: { query: "关门" } }], { text: "我看看。" }).reply("十点。");
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    expect((await messages(g)).filter((m) => m.sender === agent.id).slice(2).map((m) => m.body)).toEqual([
+      { text: "我看看。", ack: true },
+      { text: "十点。", lookups: { search: 1 } },
+    ]);
+  });
+
+  it("an acknowledgement cites nothing: a number it writes is taken out of it", async () => {
+    const { owner, agent, own } = await owned();
+    await say(owner, own, "上次那家店");
+    gateway
+      .callTools([{ name: "search", input: { query: "店" } }])
+      .callTools([{ name: "search", input: { query: "地址" } }], { text: "找到了〔m1〕，再看看地址。" })
+      .reply("在河边。");
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    const ack = (await messages(own)).find((m) => m.sender === agent.id && m.body.ack === true)!;
+    expect(ack.body).toEqual({ text: "找到了，再看看地址。", ack: true });
   });
 
   it("an acknowledgement naming another Agent calls nobody (its mentions are not read); the answer is read as any reply", async () => {

@@ -205,8 +205,11 @@ function advance(list, seq) {
   return position;
 }
 
-/** Counts towards unread: a visible message from someone else that is not a system notice. */
-const countsAsUnread = (m, meId) => m.kind !== "system" && m.senderId !== null && m.senderId !== meId;
+/**
+ * Counts towards unread: a visible message from someone else that is not a system notice, nor an Agent's acknowledgement
+ * (`ack`: what its reply said before it looked something up — the answer after it counts).
+ */
+const countsAsUnread = (m, meId) => m.kind !== "system" && m.ack !== true && m.senderId !== null && m.senderId !== meId;
 
 function unreadAfterReading(conv, list, meId, oldRead, newRead) {
   if (newRead >= conv.position) return 0;

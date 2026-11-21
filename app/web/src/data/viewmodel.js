@@ -409,6 +409,8 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     notCalled: m.senderId === meId && Array.isArray(m.notCalled) && m.notCalled.length > 0 ? notCalledText(m.notCalled, nameOf) : null,
   };
   if (hidden) view.hidden = true;
+  // An Agent's acknowledgement: shown as any message, but never the chat list's preview (state/selectors.js).
+  if (m.ack === true) view.ack = true;
   if (kind === "image") view.src = attachment.url;
   return view;
 }
@@ -451,13 +453,15 @@ function groupRunRows(conv, slots) {
 
 /**
  * Whether Agents of the group are answering each other (not a reply a person asked for): the newest message is an
- * Agent's (not a notice) and either @-mentions another Agent member (by its account name) or an Agent's reply is being
- * written. It shows 让 Agent 停下.
+ * Agent's (not a notice) and either @-mentions another Agent member (by its account name; an acknowledgement's mentions
+ * call nobody) or an Agent's reply is being written. It shows 让 Agent 停下.
  */
 function agentsTalking(model, conv, held, rows) {
   const last = held[held.length - 1];
   if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
   if (rows.some((r) => r.kind === "replying")) return true;
+  // An acknowledgement calls nobody, whatever it names.
+  if (last.ack === true) return false;
   const handleOf = (id) => model.agents[id]?.handle ?? model.principals[id]?.handle;
   return conv.members.some(
     (m) => m.id !== last.senderId && model.principals[m.id]?.kind === "agent" && mentionsHandle(last.text, handleOf(m.id)),
