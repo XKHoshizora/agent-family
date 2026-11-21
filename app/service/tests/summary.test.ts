@@ -969,6 +969,38 @@ describe("final review", () => {
     // Read, never written back.
     expect((await summaryOf(w.g, w.agent.id))!.text).toBe(stored);
   });
+
+  it("m-11: a rename loses nobody's lines from an older summary: each label is kept by whose it was, then shown and built on as that account is labelled now", async () => {
+    const w = await groupWorld("fd", 0);
+    // fdn's Agent speaks too: its label follows its owner's handle.
+    const theirs = await mustCreateAgent(app, w.n, { handle: "fdn_bot", name: "小n", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(w.n, w.g, theirs.id);
+    await seed(w.g, [w.v.id, w.m.id, theirs.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    await say(w.v, w.g, `@${w.agent.handle} 说到哪了`);
+    const first = ["人物与称呼", "主人（fdv（@fdv））是群主", "fdm（@fdm）也在", "小n（@fdn.fdn_bot）是 fdn 的助手", "说过的事", "fdm（@fdm）定下周五聚餐", "定下的事", "还没解决的"].join("\n");
+    await reply("好。", first);
+    expect((await summaryOf(w.g, w.agent.id))!.text).toBe(first);
+    // The owner's handle, a member's handle and name, and — with its owner's handle — an Agent's full handle all change.
+    expect((await api(app, w.v, "PATCH", "/api/me", { handle: "fdv2" })).status).toBe(200);
+    expect((await api(app, w.m, "PATCH", "/api/me", { handle: "fdm2", displayName: "阿m" })).status).toBe(200);
+    expect((await api(app, w.n, "PATCH", "/api/me", { handle: "fdn2" })).status).toBe(200);
+    const now = ["人物与称呼", "主人（fdv（@fdv2））是群主", "阿m（@fdm2）也在", "小n（@fdn2.fdn_bot）是 fdn 的助手", "说过的事", "阿m（@fdm2）定下周五聚餐", "定下的事", "还没解决的"].join("\n");
+    // Thirty more, so that the next reply leaves out enough for the next job.
+    await seed(w.g, [w.v.id, w.m.id], Array.from({ length: 30 }, (_, i) => short(i, "又")));
+    // (Its full handle changed with its owner's: the new one calls it.)
+    await say(w.m, w.g, "@fdv2.fd_bot 我们说到哪了");
+    const second = `${now}\n阿m（@fdm2）还没订位`;
+    await reply("好。", second);
+    // The reply is shown every line, each as its account is labelled now (as its roster labels them).
+    const shown = replyCalls()[1]!.system;
+    expect(shown).toContain(`${HEADING}\n${JSON.stringify(now)}`);
+    expect(shown).toContain("阿m（@fdm2）");
+    // The job builds on it so, and what it answers with the labels of now is kept whole.
+    expect(summaryCalls()).toHaveLength(2);
+    expect(JSON.parse((summaryCalls()[1]!.messages[0]!.parts[0] as { text: string }).text).summary).toBe(now);
+    expect((await summaryOf(w.g, w.agent.id))!.text).toBe(second);
+    expect(await counted("summary_label_dropped")).toBe(0);
+  });
 });
 
 describe("the summary's text", () => {

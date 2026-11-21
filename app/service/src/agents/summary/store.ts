@@ -5,7 +5,7 @@ import { postingRun } from "../../messages/read.ts";
 import { handleOf } from "../../principals/store.ts";
 import { personLabel } from "../runtime/prompt.ts";
 import { withoutCitations } from "../tools/refs.ts";
-import { keepLabelled } from "./prompt.ts";
+import { keepLabelled, relabelled } from "./prompt.ts";
 
 /**
  * The rolling summary's rows (migration 052; README "The rolling summary"): one per conversation and Agent. What reads it
@@ -132,29 +132,45 @@ export const summaryBase = async (q: Queryable, agentId: string, conversationId:
 
 /**
  * A pair's summary: `text` covers the messages its Agent could see whose place in the conversation (`position`: a message's
- * seq; an Agent's reply, the seq its run covered) is from `fromSeq` to `uptoSeq`, both included.
+ * seq; an Agent's reply, the seq its run covered) is from `fromSeq` to `uptoSeq`, both included. In a group, `speakers` says
+ * whose each label in `text` was when it was written (migration 056: label → principal id); null when that is not recorded
+ * (a row written before it, and the Agent's own conversation, which holds no label).
  */
 export interface Summary {
   fromSeq: number;
   uptoSeq: number;
   text: string;
+  speakers: Readonly<Record<string, string>> | null;
 }
 
 /** The summary of Agent `agentId` in `conversationId`, or null. A plain read. */
 export async function readSummary(q: Queryable, conversationId: string, agentId: string): Promise<Summary | null> {
-  const { rows } = await q.query<{ from_seq: string; upto_seq: string; text: string }>(
-    "select from_seq::text, upto_seq::text, text from conversation_summaries where conversation_id = $1 and agent_id = $2",
+  const { rows } = await q.query<{ from_seq: string; upto_seq: string; text: string; speakers: Record<string, string> | null }>(
+    "select from_seq::text, upto_seq::text, text, speakers from conversation_summaries where conversation_id = $1 and agent_id = $2",
     [conversationId, agentId],
   );
   const row = rows[0];
-  return row ? { fromSeq: Number(row.from_seq), uptoSeq: Number(row.upto_seq), text: row.text } : null;
+  return row ? { fromSeq: Number(row.from_seq), uptoSeq: Number(row.upto_seq), text: row.text, speakers: row.speakers } : null;
 }
 
-/** The labels a group summary may hold (prompt.ts `keepLabelled`): its owner's, and everyone else's. */
+/** The labels a group summary may hold (prompt.ts `keepLabelled`): its owner's and everyone else's; `ids`, whose each is. */
 export interface SpeakerLabels {
   owner: string;
   people: ReadonlySet<string>;
+  ids: ReadonlyMap<string, string>;
 }
+
+/** `SpeakerLabels` of `owner` and of the people `rows` (as `placedSpeakers` reads them), by the names and handles given. */
+function labelled(owner: { id: string; name: string; handle: string }, rows: ReadonlyArray<{ id: string; name: string; handle: string }>): SpeakerLabels {
+  const ownerLabel = personLabel(withoutCitations(owner.name), withoutCitations(owner.handle), true);
+  const ids = new Map<string, string>([[ownerLabel, owner.id]]);
+  for (const p of rows) ids.set(personLabel(withoutCitations(p.name), withoutCitations(p.handle), false), p.id);
+  return { owner: ownerLabel, people: new Set([...ids.keys()].filter((l) => l !== ownerLabel)), ids };
+}
+
+/** The owner of `r`'s pair: their name and handle now. */
+const ownerNow = async (q: Queryable, r: PlacedReader): Promise<{ id: string; name: string; handle: string }> =>
+  (await q.query<{ id: string; name: string; handle: string }>(`select p.id, p.display_name as name, ${handleOf("p")} as handle from principals p where p.id = $1`, [r.ownerId])).rows[0]!;
 
 /**
  * The speaker labels a group summary of `r`'s pair may hold: the owner's, and everyone else's who has a message the pair
@@ -162,34 +178,45 @@ export interface SpeakerLabels {
  * `personLabel`; the owner's by account, `主人（…）`).
  */
 export async function speakerLabels(q: Queryable, r: PlacedReader, base: number, upTo: number): Promise<SpeakerLabels> {
-  const owner = (await q.query<{ name: string; handle: string }>(`select p.display_name as name, ${handleOf("p")} as handle from principals p where p.id = $1`, [r.ownerId])).rows[0]!;
-  const people = new Set(
-    (await placedSpeakers(q, r, base, upTo)).flatMap((p) => (p.id === r.ownerId || p.id === r.agentId ? [] : [personLabel(withoutCitations(p.name), withoutCitations(p.handle), false)])),
+  return labelled(await ownerNow(q, r), (await placedSpeakers(q, r, base, upTo)).filter((p) => p.id !== r.ownerId && p.id !== r.agentId));
+}
+
+/** The labels of now of the owner of `r`'s pair and of the accounts `ids` (one read; an account no longer there has none). */
+async function labelsNow(q: Queryable, r: PlacedReader, ids: readonly string[]): Promise<SpeakerLabels> {
+  const owner = await ownerNow(q, r);
+  const { rows } = await q.query<{ id: string; name: string; handle: string }>(
+    `select p.id, p.display_name as name, ${handleOf("p")} as handle from principals p where p.id = any($1::uuid[]) and p.id <> $2 and p.id <> $3`,
+    [[...new Set(ids)], r.ownerId, r.agentId],
   );
-  return { owner: personLabel(withoutCitations(owner.name), withoutCitations(owner.handle), true), people };
+  return labelled(owner, rows);
 }
 
 /**
- * The pair's stored summary `s` as a reply is shown it and a job builds on it (final review I-3): its text without any
- * citation (tools/refs.ts `withoutCitations`), and in a group then held again to the labels the pair may hold now
- * (`speakerLabels` up to what it covers, after `base`; prompt.ts `keepLabelled`) — a line with any other is not shown, so
- * that a row stored before its answer was stripped of citations first cannot show a forged label either. Read only: the
- * row is never written back.
+ * The pair's stored summary `s` as a reply is shown it and a job builds on it (final review I-3, m-11): its text without any
+ * citation (tools/refs.ts `withoutCitations`); in a group, then, each label it recorded (`speakers`) rewritten to how that
+ * account is labelled now (prompt.ts `relabelled`: a rename changes the label, not the person), and the text held again to
+ * the labels it may hold now (prompt.ts `keepLabelled`) — those of the accounts it recorded, or, for a row that recorded
+ * none (written before migration 056), of everyone placed after `base` up to what it covers (`speakerLabels`) — so a line
+ * with any other is not shown: a row stored before its answer was stripped of citations first cannot show a forged label
+ * either. Read only: the row is never written back.
  */
 export async function shownSummary(q: Queryable, r: PlacedReader, base: number, s: Summary): Promise<string> {
   const text = withoutCitations(s.text);
   if (!r.group) return text;
-  return keepLabelled(text, await speakerLabels(q, r, base, s.uptoSeq)).text;
+  if (s.speakers === null) return keepLabelled(text, await speakerLabels(q, r, base, s.uptoSeq)).text;
+  const now = await labelsNow(q, r, Object.values(s.speakers));
+  const byId = new Map([...now.ids].map(([label, id]) => [id, label]));
+  return keepLabelled(relabelled(text, s.speakers, byId), now).text;
 }
 
 /** Stores the pair's summary as `s` (inserted, or replacing the one there), in the caller's transaction. */
 export async function writeSummary(q: Queryable, conversationId: string, agentId: string, s: Summary): Promise<void> {
   await q.query(
-    `insert into conversation_summaries (conversation_id, agent_id, from_seq, upto_seq, text, updated_at)
-     values ($1, $2, $3, $4, $5, now())
+    `insert into conversation_summaries (conversation_id, agent_id, from_seq, upto_seq, text, speakers, updated_at)
+     values ($1, $2, $3, $4, $5, $6::jsonb, now())
      on conflict (conversation_id, agent_id) do update
-       set from_seq = excluded.from_seq, upto_seq = excluded.upto_seq, text = excluded.text, updated_at = now()`,
-    [conversationId, agentId, s.fromSeq, s.uptoSeq, s.text],
+       set from_seq = excluded.from_seq, upto_seq = excluded.upto_seq, text = excluded.text, speakers = excluded.speakers, updated_at = now()`,
+    [conversationId, agentId, s.fromSeq, s.uptoSeq, s.text, s.speakers === null ? null : JSON.stringify(s.speakers)],
   );
 }
 

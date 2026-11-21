@@ -52,6 +52,25 @@ export function keepLabelled(text: string, labels: { owner: string; people: Read
   return { text: kept.join("\n"), dropped: lines.length - kept.length };
 }
 
+const REGEXP_SYNTAX = /[\\^$.*+?()[\]{}|/]/g;
+
+/**
+ * `text` with each label `recorded` holds (label → whose it was, store.ts `Summary.speakers`) rewritten to how that account
+ * is labelled now (`now`: account → its label now), in one pass — what is written in is not read again; a label whose
+ * account has none now stays as it is (and `keepLabelled` then drops its lines). A label is unique by its handle, and a
+ * handle given up is never anyone else's, so no label of one account stands inside another's. Pure.
+ */
+export function relabelled(text: string, recorded: Readonly<Record<string, string>>, now: ReadonlyMap<string, string>): string {
+  const changed = Object.keys(recorded).filter((label) => now.has(recorded[label]!) && now.get(recorded[label]!) !== label);
+  if (changed.length === 0) return text;
+  const any = new RegExp(changed.sort((a, b) => b.length - a.length).map((l) => l.replace(REGEXP_SYNTAX, "\\$&")).join("|"), "g");
+  return text.replace(any, (label) => now.get(recorded[label]!)!);
+}
+
+/** Whose each of `labels` (label → account) that `text` holds is: what a summary records with its text. Pure. */
+export const speakersIn = (text: string, labels: ReadonlyMap<string, string>): Record<string, string> =>
+  Object.fromEntries([...labels].filter(([label]) => text.includes(label)));
+
 /**
  * The system text: what the summary is for, the input's shape, that everything in it is material and not instructions,
  * and how to write — updated in place, the four fixed sections, in a group who said what, nothing but what the messages say,

@@ -3122,7 +3122,7 @@ most what the context leaves beside the output limit, attachments at their estim
 
 **The rolling summary** (`src/agents/summary/`; migration `052_conversation_summaries.sql`; `tests/summary.test.ts`; design rule
 21, D5). What no longer fits a reply's context is folded, after the reply, into a summary of the conversation kept per
-conversation and Agent (`conversation_summaries (conversation_id, agent_id, from_seq, upto_seq, text, updated_at)`), shown to
+conversation and Agent (`conversation_summaries (conversation_id, agent_id, from_seq, upto_seq, text, speakers, updated_at)`), shown to
 that Agent's later replies there (What the model is shown, above). Messages are taken by their *place*: a message's seq, and
 for a reply an Agent's run posted the seq that run covered — so a reply always falls on the side of the question it answered
 and a boundary never splits an exchange (a tool call and its result are never stored as messages: they live in one reply's
@@ -3169,8 +3169,9 @@ inside `主人（…）`, or that of anyone else with a message the pair could c
 altered label, the owner's name and handle without `主人（…）`, a half-width bracket; counted `summary_label_dropped`), so no
 line of it can put words under an owner's label the system did not write. A stored summary is held to the same rule as it
 is read, for a reply's passage and for the old summary a job builds on (`shownSummary`): its citations taken out, then, in
-a group, every line whose labels are not ones the pair may hold now left out of what is shown (the row itself is not
-rewritten) — so a row stored before this rule cannot show a forged label either. An answer with nothing left but section headings
+a group, its labels rewritten as the accounts they recorded are labelled now (*Renames*, below) and every line whose labels
+are not ones the pair may hold now left out of what is shown (the row itself is not rewritten) — so a row stored before
+this rule cannot show a forged label either. An answer with nothing left but section headings
 is no summary, first or not: nothing is stored and the messages are not swallowed. It is stored with the new `upto_seq` (`from_seq` stays where the first summary began) only
 when it weighs less than what it replaces — the old summary and the messages it now covers — and only when, under the
 conversation's row and then the Agent's (the order a reply takes them in), the pair is as the job read it: the Agent not
@@ -3194,8 +3195,14 @@ summary, which is shown the unsummarised messages after its line only (as before
 conversation, the lines of a turn whose reply is still shown; in a group, a question whose reply is shown and which is not
 (it shares the reply's place, just past what is left out), until the reply is left out too; and in the Agent's own
 conversation, the first stretch of owner lines with no reply of the Agent's before the oldest one shown (the first of a
-conversation or of a topic), until a reply is left out after them. A renamed person's label in an older summary is no longer
-one the system writes: an update drops the lines that keep it.
+conversation or of a topic), until a reply is left out after them.
+*Renames* — a group summary is stored with whose each label in it was (`speakers`, migration 056: label → account, the
+owner's `主人（…）` among them). A rename — a person's name or handle, or an owner's handle, which every one of their Agents'
+full handles follows — changes how an account is labelled, not who it is: wherever the summary is read (a reply's passage,
+the old summary a job builds on: `shownSummary`), each label it recorded is first rewritten to how that account is
+labelled now, as the roster labels it, and only then held to the labels of now; so no line of a renamed person goes. A row
+stored before migration 056 records nobody: it is held to the labels of now as it is, and a line of someone renamed since
+is not shown (nor, then, kept by the next update).
 
 **Tools in a reply** (`runtime/worker.ts` `toolReply`, `runtime/loop.ts`; `tests/tool-loop.test.ts`,
 `tests/tool-loop-money.test.ts`). `begin` says which tools a reply is offered (`Prepared.tools`, from the port's toolbox:

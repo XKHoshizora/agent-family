@@ -7,7 +7,7 @@ import { attachmentLabel } from "../runtime/context.ts";
 import { personLabel, speakerRole } from "../runtime/prompt.ts";
 import { liveAgent, lockAgent } from "../store.ts";
 import { withoutCitations } from "../tools/refs.ts";
-import { cleanSummary, hasContent, keepLabelled, OWNER, SELF, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
+import { cleanSummary, hasContent, keepLabelled, OWNER, SELF, speakersIn, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
 import { countPlaced, readPlaced, readSummary, shownSummary, speakerLabels, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
 
 /**
@@ -113,7 +113,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   // Messages with nothing left of them once cleaned do not count toward the minimum (a window cut for its size holds at
   // least `reviewMessages` of them, which the configuration holds to at least `summaryMinMessages`: it is not asked again).
   if (!cut && taken.length < memory.summaryMinMessages) return;
-  const next: Omit<Summary, "text"> = { fromSeq: old?.fromSeq ?? read[0]!.at, uptoSeq: upto };
+  const next: Omit<Summary, "text" | "speakers"> = { fromSeq: old?.fromSeq ?? read[0]!.at, uptoSeq: upto };
   // The old summary as a reply is shown it (store.ts `shownSummary`): what the call builds on.
   const before = old === null ? null : await shownSummary(db, reader, base, old);
 
@@ -133,12 +133,17 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   if (ctx.closing.aborted) return;
   // Cleaned, and without any citation, before its labels are looked at (prompt.ts `cleanSummary`).
   const cleaned = answer === null ? null : cleanSummary(answer, memory.summaryMaxWeight);
-  // In a group every speaker label must be one the system wrote: a line with any other goes (counted).
+  // In a group every speaker label must be one the system wrote, by names and handles now: a line with any other goes
+  // (counted); whose each label kept is, is stored with it (`speakers`), so that a rename since changes its label, not
+  // whose it is (store.ts `shownSummary`).
   let labelled = cleaned;
+  let speakers: Summary["speakers"] = null;
   if (cleaned !== null && reader.group) {
-    const kept = keepLabelled(cleaned, await speakerLabels(db, reader, base, job.upTo));
+    const labels = await speakerLabels(db, reader, base, job.upTo);
+    const kept = keepLabelled(cleaned, labels);
     count(db, "summary_label_dropped", kept.dropped);
     labelled = kept.text;
+    speakers = speakersIn(labelled, labels.ids);
   }
   // Headings and nothing else are no summary: never stored, and the messages are not swallowed.
   const text = labelled !== null && hasContent(labelled) ? labelled : null;
@@ -166,7 +171,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
       if (now === null || next.fromSeq <= now) return false;
       const current = await readSummary(t, job.conversationId, agent.id);
       if (!sameSummary(current, stored)) return false;
-      await writeSummary(t, job.conversationId, agent.id, { ...next, text });
+      await writeSummary(t, job.conversationId, agent.id, { ...next, text, speakers });
       return true;
     });
   } catch (err) {
