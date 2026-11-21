@@ -150,8 +150,9 @@ interface RunMoney {
  * The most one more tool round can add to the next call's input, in the unit holds are counted in (a token a byte):
  * `k` results — the calls one reply may run in all, each result at most 3 × `resultMaxWeight` bytes (weight is
  * ⌈bytes / 3⌉, and results are cut by weight) and 200 of framing (its id, its name, its JSON) — and the round's own turn
- * with the notes answering calls not run, at most 6 bytes an output token of `maxOutputTokens`, and 300. What the room
- * for the last call is renewed by (`begin`, `extend`).
+ * with the notes answering calls not run, allowed 6 bytes an output token of `maxOutputTokens`, and 300 — a bound in real
+ * tokens that a round can pass in bytes (README "Metering", the free allowance's room). What the room for the last call is
+ * renewed by (`begin`, `extend`).
  */
 const roomGrowth = (k: number, resultMaxWeight: number, maxOutputTokens: number): number => k * (3 * resultMaxWeight + 200) + 6 * maxOutputTokens + 300;
 
@@ -317,21 +318,12 @@ export class DbAgentPort implements AgentPort {
 
   /**
    * The stop route's step after its transaction found the run `running` and kept the stop in its row (runs.ts `stopRun`,
-   * `stop_asked`): `requestStop`, then a run its admission held back to `queued` meanwhile is stopped at once, as a stop of
-   * a queued run always is, and its owner told. Its row alone is locked (a statement of its own), after the stop's
-   * transaction committed. A run claimed again meanwhile ends stopped at its `begin` (`halted` reads the row).
+   * `stop_asked`): the attempt this process works on stops within 50 ms (`requestStop`). Any later attempt — after its
+   * admission held it back, say — ends stopped at its `begin` (`halted` reads the row under the run's lock, which `stopRun`
+   * wrote it under, so a run the stop saw running can no longer go back to `queued`).
    */
-  async stopAsked(runId: string): Promise<void> {
+  stopAsked(runId: string): void {
     this.requestStop(runId);
-    const { rows } = await this.deps.db.query<RunRow & { owner_id: string; conversation_id: string }>(
-      `update agent_runs as r set status = 'stopped', finished_at = now() where r.id = $1 and r.status = 'queued'
-        returning ${RUN_COLUMNS}, r.owner_id, r.conversation_id`,
-      [runId],
-    );
-    const row = rows[0];
-    if (!row) return;
-    this.flags.delete(runId);
-    this.announce({ ownerId: row.owner_id, conversationId: row.conversation_id, run: toWireRun(row) });
   }
 
   /**
@@ -984,7 +976,7 @@ export class DbAgentPort implements AgentPort {
         const reminded = await deliverReminder(this.deps.db, this.deps.config, result.reminder);
         if (reminded) {
           this.deps.log.info({ metric: reminded.metric }, "a reminder about money was made for its owner");
-          this.deps.realtime.pushWhisper(reminded.whisper.ownerId, toWireWhisper(reminded.whisper));
+          if (reminded.whisper) this.deps.realtime.pushWhisper(reminded.whisper.ownerId, toWireWhisper(reminded.whisper));
         }
       } catch (err) {
         this.deps.log.error({ err, runId: run.id }, "agent run: its owner's reminder about money could not be made now; the periodic sweep makes it");

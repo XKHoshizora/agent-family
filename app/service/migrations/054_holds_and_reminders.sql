@@ -23,8 +23,9 @@ alter table agent_runs add column stop_asked boolean not null default false;
 -- used) and `empty` (used up with the balance at or below zero), at most one of each per owner and site day; `balance` (a
 -- call took the balance from above zero to zero or below), once per crossing. Its whisper is made after that transaction
 -- commits, in the conversation of `agent_id` (a reply's own Agent; null: the Agent its owner used last), with the
--- whisper's own locks; `delivered_at` says it was (also when no whisper could be made, or none was due: an `empty`'s
--- `warn`). The periodic sweep delivers any left undelivered (a crash between the two). `agent_id` has no foreign key: the
+-- whisper's own locks (in the next Agent's conversation, used last first, when it cannot be made there); `delivered_at`
+-- says it was (also when the owner had no Agent at all, or none was due: an `empty`'s `warn`). The periodic sweep
+-- delivers any left undelivered (a crash between the two, or nowhere to make it then). `agent_id` has no foreign key: the
 -- settlement must take no lock on an Agent's row it does not hold already. An owner's earlier days are deleted as a new
 -- one is written.
 create table allowance_reminders (
@@ -38,6 +39,8 @@ create table allowance_reminders (
   created_at timestamptz not null default now()
 );
 create unique index allowance_reminders_once on allowance_reminders (owner_id, day, threshold) where threshold in ('warn', 'empty');
+-- An owner's rows by day: the delete of their earlier days at each new one, and the cascade of a deleted owner.
+create index allowance_reminders_owner on allowance_reminders (owner_id, day);
 create index allowance_reminders_undelivered on allowance_reminders (created_at) where delivered_at is null;
 
 -- A whisper of kind `allowance`: one of those reminders.

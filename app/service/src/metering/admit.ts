@@ -115,6 +115,17 @@ export function chargeSource(tier: "free" | "paid", left: PerSource): ChargeTo |
   return left.balanceMicro > 0n ? "balance" : null;
 }
 
+/**
+ * The product owner's open question (fix round 1 review, N-5), decided here and nowhere else: a free-tier call that finds
+ * today's free allowance not spent but all held by the owner's running calls — something is left of it, nothing after
+ * their holds. `"balance"` (as it always has been): it goes on to the balance, when the balance has room after its holds.
+ * `"free"`: it waits for the free allowance instead — a reply is held back on it until one of those calls ends; a persona
+ * draft, which never waits, takes it. Either answer is this one line.
+ */
+export function whileFreeIsAllHeld(): "balance" | "free" {
+  return "balance";
+}
+
 /** `share` (`HOLDS.maxOpenShare`, 0.01 to 1) of `micro`, rounded down, in whole micro-points. */
 const shareOf = (micro: bigint, share: number): bigint => (micro * BigInt(Math.round(share * 1_000_000))) / 1_000_000n;
 
@@ -163,7 +174,8 @@ export async function admit(
   const holds = await readHolds(t, ownerId);
   const firstMicro = maxCostMicro(resolved, inputTokensEstimate);
   // The existing rule, on what is left after the holds; and on what is left, holds aside (whether anything is).
-  const chargeTo = chargeSource(tier, headroom({ freeDailyMicro: config.freeDailyMicro, freeUsedMicro, balanceMicro: account.balanceMicro, holds }));
+  const afterHolds = headroom({ freeDailyMicro: config.freeDailyMicro, freeUsedMicro, balanceMicro: account.balanceMicro, holds });
+  const chargeTo = tier === "free" && raw.freeMicro > 0n && whileFreeIsAllHeld() === "free" ? "free" : chargeSource(tier, afterHolds);
   const anything = chargeSource(tier, raw);
   if (anything === null) {
     throw new AppError(

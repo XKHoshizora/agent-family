@@ -285,7 +285,7 @@ export interface DraftDeps {
   log: Pick<FastifyBaseLogger, "error" | "warn">;
   /** The drafts this process is working on, by run id (the stale-run sweep leaves them alone). */
   inFlight: Set<string>;
-  /** A reminder about money the draft's settlement wrote (metering/owner-call.ts `reminded`). */
+  /** A reminder about money the draft's settlement recorded, once made (metering/owner-call.ts `reminded`). */
   reminded?: (reminder: Reminded) => void;
   /**
    * Ends a draft's run that will not be finished here (the service is closing) as recovery ends one: `failed`,

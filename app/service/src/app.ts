@@ -315,7 +315,7 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
       for (const r of reminded) app.log.info({ metric: r.metric }, "a reminder about money was made for its owner");
       // (The hub is decorated once the app is built; a run before that has nobody to tell.)
       const hub = app.hasDecorator("realtime") ? app.realtime : null;
-      if (hub) pushWhispers(hub, [...expired, ...reminded.map((r) => r.whisper)]);
+      if (hub) pushWhispers(hub, [...expired, ...reminded.flatMap((r) => (r.whisper ? [r.whisper] : []))]);
       return { unsent: 0, abandoned: 0 };
     },
     intervalMinutes: config.memory.changesSweepMs / 60_000,

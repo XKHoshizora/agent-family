@@ -62,10 +62,10 @@ export function registerRunRoutes(app: FastifyInstance, { readLimit }: { readLim
       const { stopped, running } = await db.tx((t) => stopRun(t, me.id, req.params.id, req.params.runId));
       if (stopped) app.agentPort.announce(stopped);
       if (running) {
-        // This process's worker stops it within 50 ms. A run nobody here is working on (another instance's, or one left
-        // by a process that is gone) would never read the flag: it is released now, as recovery would end it.
-        // Its admission may have held it back to queued meanwhile: `stopAsked` stops it then too.
-        if (app.agentWorker.isWorking(req.params.runId)) await app.agentPort.stopAsked(req.params.runId);
+        // This process's worker stops it within 50 ms; a later attempt of it ends stopped (the stop is kept in its row).
+        // A run nobody here is working on (another instance's, or one left by a process that is gone) would never read
+        // the flag: it is released now, as recovery would end it.
+        if (app.agentWorker.isWorking(req.params.runId)) app.agentPort.stopAsked(req.params.runId);
         else await app.agentPort.releaseRun(req.params.runId);
       }
       return { ok: true as const };

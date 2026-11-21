@@ -312,10 +312,10 @@ export function registerAgentRoutes(
           log: req.log,
           inFlight: draftRuns,
           release: (runId) => app.agentPort.releaseRun(runId),
-          // A reminder about money its settlement wrote: pushed to its owner and counted, now that it is committed.
+          // A reminder about money its settlement recorded, made once committed: pushed to its owner and counted.
           reminded: ({ whisper, metric }) => {
-            req.log.info({ metric }, "a reminder about money was written for its owner");
-            app.realtime.pushWhisper(whisper.ownerId, toWireWhisper(whisper));
+            req.log.info({ metric }, "a reminder about money was made for its owner");
+            if (whisper) app.realtime.pushWhisper(whisper.ownerId, toWireWhisper(whisper));
           },
         },
         me.id,

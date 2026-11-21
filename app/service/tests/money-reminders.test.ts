@@ -75,6 +75,15 @@ const whispersIn = async (who: Actor, conv: string): Promise<string[]> => {
 const metrics = () => lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => typeof e.metric === "string" && /^(allowance_|balance_)/.test(e.metric as string));
 /** The log lines that tell of a deadlock (40P01) Postgres broke since `lines` was last emptied. */
 const deadlocks = () => lines.filter((l) => l.includes("40P01") || l.includes("deadlock detected"));
+/** A reminder a settlement recorded for `agentId` today (or `daysBack` site days ago), its whisper not made yet: its id. */
+const recorded = async (ownerId: string, threshold: "warn" | "empty" | "balance", agentId: string, daysBack = 0) =>
+  (
+    await db.query<{ id: string }>(
+      `insert into allowance_reminders (owner_id, day, threshold, agent_id)
+       values ($1, (now() at time zone 'Asia/Shanghai')::date - $4::int, $2, $3) returning id::text`,
+      [ownerId, threshold, agentId, daysBack],
+    )
+  ).rows[0]!.id;
 /** How many statements of this database wait for a row lock now. */
 const lockWaits = async () =>
   (await db.query<{ n: number }>("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'")).rows[0]!.n;
@@ -335,6 +344,72 @@ describe("reminders of the day's free allowance and of the balance", () => {
     expect(posted.status).toBe(200);
     await vi.waitFor(async () => expect(await whispersIn(owner, bob.conversationId)).toEqual([WARN]), { timeout: 5_000 });
     expect(drafts.pending()).toBe(0);
+  });
+
+  it("a reminder whose Agent is deleted while its whisper is being made is said in the conversation of the owner's Agent used last of those left, and marked made only then", async () => {
+    const owner = await signUp(app, "racewarn");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    const bob = await mustCreateAgent(app, owner, { model: FREE, name: "Bob", persona: "简短地回答。" });
+    await say(owner, ann.conversationId, "早");
+    const id = await recorded(owner.id, "warn", bob.id);
+    const { deliverReminder } = await import("../src/metering/reminders.ts");
+    const other = await db.pool.connect();
+    try {
+      // Bob's row held: the delivery has read Bob alive and waits for his row inside `createWhisper`…
+      await other.query("begin");
+      await other.query("select 1 from agents where principal_id = $1 for update", [bob.id]);
+      const delivering = deliverReminder(db, app.deps.config, id);
+      await vi.waitFor(async () => expect(await lockWaits()).toBeGreaterThanOrEqual(1), { timeout: 5_000 });
+      // …and Bob is deleted meanwhile: no whisper can be made in his conversation.
+      await other.query("update agents set deleted_at = now() where principal_id = $1", [bob.id]);
+      await other.query("commit");
+      expect((await delivering)?.whisper?.conversationId).toBe(ann.conversationId);
+    } finally {
+      await other.query("rollback").catch(() => {});
+      other.release();
+    }
+    expect(await whispersIn(owner, ann.conversationId)).toEqual([WARN]);
+    const [row] = (await db.query("select whisper_id, delivered_at from allowance_reminders where id = $1", [id])).rows;
+    expect(row.whisper_id).not.toBeNull();
+    expect(row.delivered_at).not.toBeNull();
+  });
+
+  it("a reminder of an owner with no Agent left at all is marked done with nothing made, and counted (reminder_no_agent)", async () => {
+    const owner = await signUp(app, "noagentleft");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    const id = await recorded(owner.id, "warn", ann.id);
+    expect((await api(app, owner, "DELETE", `/api/agents/${ann.id}`)).status).toBe(200);
+    const { deliverReminder } = await import("../src/metering/reminders.ts");
+    expect(await deliverReminder(db, app.deps.config, id)).toEqual({ whisper: null, metric: "reminder_no_agent" });
+    const [row] = (await db.query("select whisper_id, delivered_at from allowance_reminders where id = $1", [id])).rows;
+    expect(row.whisper_id).toBeNull();
+    expect(row.delivered_at).not.toBeNull();
+    // Done: never made again.
+    expect(await deliverReminder(db, app.deps.config, id)).toBeNull();
+  });
+
+  it("the sweep drops a reminder recorded on an earlier site day: marked done, nothing made — what it said is no longer true", async () => {
+    const owner = await signUp(app, "staleday");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    const id = await recorded(owner.id, "warn", ann.id, 1);
+    const { deliverReminders } = await import("../src/metering/reminders.ts");
+    const made = await deliverReminders(db, app.deps.config, app.log);
+    expect(made.filter((r) => r.whisper?.ownerId === owner.id)).toEqual([]);
+    expect(await whispersIn(owner, ann.conversationId)).toEqual([]);
+    const [row] = (await db.query("select whisper_id, delivered_at from allowance_reminders where id = $1", [id])).rows;
+    expect(row.whisper_id).toBeNull();
+    expect(row.delivered_at).not.toBeNull();
+  });
+
+  it("the used-up reminder names the midnight after the site day it was recorded for, whenever its whisper is made", async () => {
+    const owner = await signUp(app, "emptyday");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    const id = await recorded(owner.id, "empty", ann.id);
+    // Its settlement's transaction began the day before (by milliseconds, at midnight): the day recorded is what counts.
+    await db.query("update allowance_reminders set created_at = now() - interval '1 day' where id = $1", [id]);
+    const { deliverReminder } = await import("../src/metering/reminders.ts");
+    await deliverReminder(db, app.deps.config, id);
+    expect(await whispersIn(owner, ann.conversationId)).toEqual([EMPTY]);
   });
 
   it("a reminder whose whisper was never made — the service stopped between the settlement and the whisper — is made by the periodic sweep, once, also when two sweeps run at once", async () => {

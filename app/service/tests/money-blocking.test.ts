@@ -658,7 +658,7 @@ describe("fix round 1: spend clamped to what was held, a requeued attempt that c
     expect(again.id).toBe(bob.id);
     // …the stop's transaction sees it running, and the route tells a port that is not working on it…
     expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
-    await port.stopAsked(bob.id);
+    port.stopAsked(bob.id);
     expect(await runIn(b.conv)).toMatchObject({ status: "running" });
     // …and the attempt ends stopped all the same: never admitted, never left to run later.
     expect(await two.begin(again)).toEqual({ status: "stopped" });
@@ -893,6 +893,47 @@ describe("fix round 2: the free allowance's room for the last call, renewed a ro
     // Not the whole context any more: far below it.
     expect(holds[0]).toBeLessThan(callMax(first) + room(1_000_000, 6, METER));
     expect(third.toolChoice).toBeUndefined();
+    last.release("去吃川菜。", { usage: U(2000, 70) });
+    await running;
+    expect(await runIn(conv)).toMatchObject({ status: "done", hold: "0", charge_to: "free" });
+  });
+
+  it("the room kept is the one renewed: a reply whose upstream over-reports, two rounds, the second's renewal not fitting — so far is clamped beside the renewed room and the last call is made within it, the hold unchanged", async () => {
+    // Two calls of search at most (k = 2), each bringing back nearly a whole result, each asked for with a long query: the
+    // two rounds together add more than one round can (`G`), so a last call held against the room kept at admission would
+    // pass it; the room renewed after round 1 covers it.
+    const holds: bigint[] = [];
+    let runs = 0;
+    const box: Toolbox = {
+      offer: () => ({ tools: [SEARCH], perTool: { search: 2 }, kinds: { search: "search" } }),
+      run: async (): Promise<ToolOutcome> => {
+        const hold = BigInt((await runIn(conv)).hold);
+        holds.push(hold);
+        // Before round 2's extend: what is left of the free allowance beside the reply is its own hold, so another round
+        // (its room renewed again) does not fit and the next call is the last.
+        if (++runs === 2) await setFreeUsed(owner.id, 100n * POINT - hold);
+        return { output: { text: "a".repeat(8900) }, activity: "search" };
+      },
+    };
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: `a${"查".repeat(1700)}` } }], { usage: U(1_000_000, 50) })
+      .callTools([{ name: "search", input: { query: `b${"查".repeat(1700)}` } }], { usage: U(1_000_000, 50) });
+    const last = gateway.hang();
+    const { worker } = workerWith(gateway, { box, config: withFree(100) });
+    const owner = await signUp(app, "renewedroom");
+    const conv = (await agentOf(owner, FREE, "Remy")).conv;
+    await say(owner, conv, "附近有什么好吃的？");
+    const running = worker.runOnce();
+    const third = await last.reached;
+    const [c1] = gateway.calls as [ModelCall];
+    const first = holdTokens([c1.system, ...textsOf(c1), JSON.stringify(c1.tools)], METER.context, METER.out) + TOOL_PREAMBLE_TOKENS;
+    const callMax = (input: number) => BigInt(input) * 100n + 1000n * 1000n;
+    // The last call could not be made within the room kept at admission…
+    expect(callMax(nextInput(third, METER.context, METER.out))).toBeGreaterThan(room(first, 2, METER));
+    // …it is the last (no further round fitted), and its hold is the one after round 1: not raised.
+    expect(third.toolChoice).toBe("none");
+    expect(holds).toHaveLength(2);
+    expect(BigInt((await runIn(conv)).hold)).toBe(holds[1]);
     last.release("去吃川菜。", { usage: U(2000, 70) });
     await running;
     expect(await runIn(conv)).toMatchObject({ status: "done", hold: "0", charge_to: "free" });

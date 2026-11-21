@@ -103,7 +103,7 @@ if (command === "migrate") {
     console.log(`deleted ${removed} answered or expired whisper(s) made ${WHISPER_KEEP_DAYS} days ago`);
     // And the reminders about money a settlement recorded but whose whisper was never made (their owners see them at their next sync).
     const reminded = await deliverReminders(db, config, { warn: (what, msg) => console.error(`${msg} (code ${String(what.code)})`) });
-    console.log(`made ${reminded.length} reminder(s) about money left undelivered`);
+    console.log(`made ${reminded.filter((r) => r.whisper).length} reminder(s) about money left undelivered (${reminded.filter((r) => !r.whisper).length} of owners with no Agent left)`);
   } finally {
     await db.close();
   }
