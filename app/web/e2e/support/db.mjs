@@ -34,3 +34,35 @@ export function backdateMessage(conversationId, seq, days) {
     return rows[0].created_at.toISOString();
   });
 }
+
+/**
+ * Holds an ACCESS EXCLUSIVE lock on `table` of the suite's database (nothing can read or write it) until `release()`:
+ * what makes a query that reads it wait, for a spec that must watch something that lasts a moment (a tool at work).
+ * `table` is one of a short list of the service's own tables. Resolves once the lock is held; the caller must release it
+ * (a `finally`), or everything waits until the connection ends with the test run.
+ */
+export async function holdTableLock(table) {
+  if (!["messages", "memberships", "principals", "conversations", "agent_runs"].includes(table)) throw new Error("not a table a spec may lock");
+  if (REMOTE) throw new Error("the database is reachable only in the local suite");
+  const pg = createRequire(path.join(SERVICE_DIR, "package.json"))("pg");
+  const client = new pg.Client({ connectionString: e2eDatabaseUrl() });
+  await client.connect();
+  try {
+    const { rows } = await client.query("select current_database() as name");
+    if (rows[0].name !== E2E_DATABASE) throw new Error(`refusing to lock in database ${rows[0].name}`);
+    await client.query("begin");
+    await client.query(`lock table ${table} in access exclusive mode`);
+  } catch (error) {
+    await client.end().catch(() => {});
+    throw error;
+  }
+  let released = false;
+  return {
+    release: async () => {
+      if (released) return;
+      released = true;
+      await client.query("rollback").catch(() => {});
+      await client.end().catch(() => {});
+    },
+  };
+}

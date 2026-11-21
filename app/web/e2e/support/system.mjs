@@ -169,8 +169,8 @@ async function freshDatabase() {
   }
 }
 
-/** What a spec may set for the next start of the service (`restart(extra)`): small brakes, nothing else. */
-const ADJUSTABLE = new Set(["AGENT_CHAIN_LIMIT", "MEMORY"]);
+/** What a spec may set for the next start of the service (`restart(extra)`): small brakes (`TOOLS`: a reply's tool bounds, JSON), nothing else. */
+const ADJUSTABLE = new Set(["AGENT_CHAIN_LIMIT", "MEMORY", "TOOLS"]);
 
 /**
  * The service process. `start()` spawns it (same environment every time, plus what the last `restart(extra)` set) and
