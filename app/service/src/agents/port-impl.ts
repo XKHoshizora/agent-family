@@ -14,7 +14,7 @@ import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
-import { toldHits, toldPassage } from "./tools/elsewhere.ts";
+import { toldHits, toldPassage, TOLD_TURN } from "./tools/elsewhere.ts";
 import { citesIn, RunRefs, withoutCitations } from "./tools/refs.ts";
 import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
@@ -440,6 +440,7 @@ export class DbAgentPort implements AgentPort {
           reserved: number;
           withoutTools: string | null;
           tools: { refs: RunRefs; heardTo: number } | null;
+          told: boolean;
         }
     > => {
       const { agent, state } = await this.lockRun(t, run);
@@ -504,7 +505,7 @@ export class DbAgentPort implements AgentPort {
         (tools: boolean) =>
         (mark: string, speakers: readonly Speaker[]): SystemText => {
           const text = scene
-            ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
+            ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, told === null ? tools : "told")
             : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
           // What a reply `告诉他们` queued is to tell, after the rest (measured with it: `rest`).
           if (told === null) return text;
@@ -560,7 +561,7 @@ export class DbAgentPort implements AgentPort {
       // above), and its tools show it nothing later (`RunScope.heardTo`).
       const heard = offer === null ? null : await t.query<{ seq: string }>("select seq::text from conversations where id = $1", [run.conversationId]);
       const tools = heard === null || refs === null ? null : { refs, heardTo: Number(heard.rows[0]?.seq ?? 0) };
-      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved, withoutTools, tools };
+      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved, withoutTools, tools, told: told !== null };
     });
     if ("end" in first) return first.end;
 
@@ -570,6 +571,8 @@ export class DbAgentPort implements AgentPort {
       context = await buildContext(blobs, first.loaded, first.resolved, log, {
         signal: closing ? AbortSignal.any([closing, deadline]) : deadline,
         stop: () => this.shouldStop(run),
+        // A told reply whose group ends with the Agent's own message ends its call with what it is to do.
+        ...(first.told ? { closing: TOLD_TURN } : {}),
       });
     } catch (err) {
       if (closing?.aborted) throw closing.reason;

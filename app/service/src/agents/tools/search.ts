@@ -7,7 +7,7 @@ import { askerLine, callsSeen } from "../context.ts";
 import type { ToolOutcome } from "../runtime/port.ts";
 import { cleanText, labelName, NO_GROUP_TITLE, oneLine, TOOL_MATERIAL, withoutMark } from "../runtime/prompt.ts";
 import { siteDateTime, siteWeekday } from "./clock.ts";
-import type { RunScope, ToolDeps } from "./index.ts";
+import type { ElsewhereAsk, RunScope, ToolDeps } from "./index.ts";
 import { withoutCitations } from "./refs.ts";
 
 /**
@@ -166,7 +166,7 @@ export async function searchMessages(deps: ToolDeps, scope: RunScope, input: Sea
   }
 
   if (found.rows.length === 0) {
-    if (scope.group) lookElsewhere(deps, scope, term);
+    if (scope.group) lookElsewhere(deps, scope, { term, from, before, after });
     const note = scope.group ? NOT_FOUND_IN_GROUP + (found.ownerAsked ? ASK_ME_AT_HOME : "") : NOT_FOUND;
     return { output: { results: [], note }, query: term };
   }
@@ -179,11 +179,11 @@ export async function searchMessages(deps: ToolDeps, scope: RunScope, input: Sea
  * or delay what the model is told. Whatever it throws, or the promise it returns rejects with, is logged by its kind only
  * (never the words or anything found).
  */
-function lookElsewhere(deps: ToolDeps, scope: RunScope, term: string): void {
+function lookElsewhere(deps: ToolDeps, scope: RunScope, ask: ElsewhereAsk): void {
   const hook = deps.elsewhere;
   if (hook === undefined) return;
   void Promise.resolve()
-    .then(() => hook(scope, term))
+    .then(() => hook(scope, ask))
     .catch((err: unknown) => deps.log.warn({ runId: scope.id, kind: (err as { name?: unknown } | null)?.name ?? typeof err }, "agent tool: the elsewhere hook failed"));
 }
 

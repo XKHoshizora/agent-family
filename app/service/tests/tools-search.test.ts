@@ -219,7 +219,7 @@ describe("what a search refuses", () => {
   it("in a group, nothing found calls the elsewhere hook (Task 8) once with the run and the words; never when something is found, never in the Agent's own conversation", async () => {
     const { owner, agent, own } = await owned("owen");
     const called: Array<{ conversationId: string; query: string }> = [];
-    const hooked = deps({ elsewhere: (scope, query) => void called.push({ conversationId: scope.conversationId, query }) });
+    const hooked = deps({ elsewhere: (scope, ask) => void called.push({ conversationId: scope.conversationId, query: ask.term }) });
     const mia = await signUp(app, "mia");
     const g = await group(app, owner, "饭搭子", [mia, await signUp(app, "ned")]);
     await addAgent(owner, g, agent.id);

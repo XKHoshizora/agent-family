@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentPort, type DbAgentPort, type Toolbox } from "../src/agents/port-impl.ts";
 import type { RunScope } from "../src/agents/tools/index.ts";
+import { CONTINUE_TURN } from "../src/agents/runtime/context.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import type { ToolSpec } from "../src/models/gateway.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -282,6 +283,24 @@ describe("an acknowledgement, then the answer", () => {
       { text: "我看看。", ack: true },
       { text: "十点。", lookups: { search: 1 } },
     ]);
+  });
+
+  it("a retry after an acknowledgement nobody wrote after ends its call with a person's turn (the plan shows nothing of the Agent's after the newest person's message); so does the ordinary call", async () => {
+    const { owner, agent, own } = await owned();
+    await say(owner, own, "查一下");
+    gateway.callTools([{ name: "search", input: { query: "x" } }], { text: "我先查一下。" }).fail("provider_unavailable", { status: 502 });
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    // The failed reply's first call: the conversation as it was, ending with the owner's question.
+    const plain = (t: { role: string; parts: Array<{ type: string; text?: string }> }) => [t.role, t.parts.map((p) => p.text)];
+    expect(gateway.calls.at(-2)!.messages.map(plain)).toEqual([["user", ["查一下"]]]);
+    expect((await lastRun(agent.id, own)).status).toBe("failed");
+    expect((await api(app, owner, "POST", `/api/conversations/${own}/runs/retry`, {})).status).toBe(201);
+    gateway.reply("查到了。");
+    expect(await toolWorker().worker.runOnce()).toBe(true);
+    const retried = gateway.calls.at(-1)!.messages;
+    expect(retried.map(plain)).toEqual([["user", ["查一下"]]]);
+    expect(retried.at(-1)!.role).toBe("user");
+    expect(JSON.stringify(retried)).not.toContain(CONTINUE_TURN);
   });
 
   it("an acknowledgement cites nothing: a number it writes is taken out of it", async () => {

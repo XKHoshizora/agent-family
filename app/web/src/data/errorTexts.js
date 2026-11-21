@@ -98,6 +98,11 @@ const WHISPER = {
   answer: {
     stale_whisper: "这条悄悄话已经处理过了。",
     not_found: "这条悄悄话已经不在了。",
+    // 告诉他们 refused for the reply it would start (README "Whispers": as the owner's retry); the whisper stays open.
+    busy_run: "它正在回复，说完再点。",
+    agent_paused: "这个 Agent 已暂停，恢复后才能重试。",
+    invalid_request: "这个 Agent 还没有选择模型。",
+    rate_limited: "回复太频繁了，请稍等一分钟再试。",
   },
 };
 /** Why my answer to a whisper (告诉他们, 不用) was refused. */

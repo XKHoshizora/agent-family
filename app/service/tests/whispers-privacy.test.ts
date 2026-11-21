@@ -203,8 +203,12 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === a.id);
     const lee = await signUp(app, "lee");
     await befriend(app, w.owner, lee);
-    expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/members`, { principalId: lee.id })).status).toBe(201);
+    // Lee's socket is open before the join, and the join's own frame to it is waited for: what comes after is all that is
+    // read (a socket opened after the join could get that frame or not, by timing).
     const leeSocket = await connect(app, lee);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/members`, { principalId: lee.id })).status).toBe(201);
+    await leeSocket.waitFor((e) => e.type === "conversation" && e.id === w.g);
+    const joined = leeSocket.events.length;
     const first = await reads(w, lee, a.id);
     const b = await whisper(w);
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id);
@@ -212,7 +216,8 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id && e.whisper.status === "accepted");
     // Byte for byte what they read before the second one (its id answered as the first's was: as an id that is none).
     expect(await reads(w, lee, b.id)).toEqual(first);
-    expect(leeSocket.events).toEqual([]);
+    expect(leeSocket.events.slice(joined)).toEqual([]);
+    expect(leeSocket.events.some((e) => e.type === "whisper")).toBe(false);
     nothingOf(
       first.map(([label, , body]) => [label, body]),
       [a.id, b.id],

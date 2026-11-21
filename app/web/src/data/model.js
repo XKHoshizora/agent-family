@@ -1004,9 +1004,27 @@ const WHISPER_STATUSES = new Set(["open", "accepted", "declined", "expired"]);
 const WHISPER_ACTIONS = new Set(["tell", "dismiss"]);
 
 /** A whisper as the service sends it (README "Whispers"), only the fields shown; null when it is not one. */
+/** At most this many hits of a `found_elsewhere` whisper are kept (the service sends at most 5). */
+const WHISPER_HITS_MAX = 5;
+const HIT_KEYS = ["where", "who", "when", "text"];
+
+/**
+ * What a `found_elsewhere` whisper found (its `detail.hits`, sent to me alone: README "Whispers"): each hit with its four
+ * strings, at most WHISPER_HITS_MAX; a hit that is not one is left out.
+ */
+function hitsOf(w) {
+  const hits = w.kind === "found_elsewhere" ? w.detail?.hits : null;
+  if (!Array.isArray(hits)) return [];
+  return hits
+    .filter((h) => h && typeof h === "object" && HIT_KEYS.every((k) => typeof h[k] === "string"))
+    .slice(0, WHISPER_HITS_MAX)
+    .map(({ where, who, when, text }) => ({ where, who, when, text }));
+}
+
 function whisperOf(w) {
   if (!w || typeof w !== "object" || typeof w.id !== "string" || typeof w.conversationId !== "string") return null;
   if (!Number.isSafeInteger(w.afterSeq) || w.afterSeq < 0 || typeof w.text !== "string" || !WHISPER_STATUSES.has(w.status)) return null;
+  const hits = hitsOf(w);
   return {
     id: w.id,
     conversationId: w.conversationId,
@@ -1017,6 +1035,7 @@ function whisperOf(w) {
     actions: Array.isArray(w.actions) ? [...new Set(w.actions.filter((a) => WHISPER_ACTIONS.has(a)))] : [],
     status: w.status,
     createdAt: typeof w.createdAt === "string" ? w.createdAt : null,
+    ...(hits.length > 0 ? { hits } : {}),
   };
 }
 

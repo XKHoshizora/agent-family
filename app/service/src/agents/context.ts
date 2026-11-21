@@ -660,7 +660,7 @@ export async function buildContext(
   loaded: LoadedContext,
   resolved: Pick<Resolved, "vision" | "pdf">,
   log: Pick<FastifyBaseLogger, "error">,
-  { signal, stop = () => false }: { signal?: AbortSignal; stop?: () => boolean } = {},
+  { signal, stop = () => false, closing }: { signal?: AbortSignal; stop?: () => boolean; closing?: string } = {},
 ): Promise<BuiltContext> {
   const plan = new ContextPlan(loaded.entries, loaded.budget, loaded.planRatio);
   /** Whether a read of this build has succeeded (the store answered), and how many have failed. */
@@ -712,6 +712,7 @@ export async function buildContext(
   for (const [slot, attachment] of plan.attachments(false)) await show(slot, attachment);
   plan.keepOlder();
   for (const [slot, attachment] of plan.attachments(true)) await show(slot, attachment);
-  const { messages, tokens, fixed } = plan.build();
+  // A call that would end with the Agent's own turn ends with `closing` (default `CONTINUE_TURN`, `ContextPlan.build`).
+  const { messages, tokens, fixed } = plan.build(closing);
   return { messages, inputTokensEstimate: systemTokens(loaded.system) + tokens, fixedTokens: fixed };
 }

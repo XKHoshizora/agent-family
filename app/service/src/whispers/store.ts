@@ -228,11 +228,11 @@ export async function createWhisper(
  * Whether one more `found_elsewhere` whisper of `ownerId` may be made in `conversationId` for Agent `agentId`'s reply run
  * `runId` (Task 8, agents/tools/elsewhere.ts): not when that reply has made one already (a `found_elsewhere` whisper of the
  * Agent there made since the run began: an Agent has one reply under way there at most), nor while the owner has `openMax`
- * open there. Read in the caller's transaction, under the Agent's row it has locked (so two of one reply are one after
- * the other); it locks nothing itself.
+ * open there. Read once before the lookup's query (so a lookup with no room costs none), and again in the whisper's
+ * transaction, under the Agent's row it has locked (so two of one reply are one after the other); it locks nothing itself.
  */
 export async function roomForFoundElsewhere(
-  t: Tx,
+  t: Queryable,
   w: { ownerId: string; conversationId: string; agentId: string; runId: string },
   openMax: number,
 ): Promise<boolean> {

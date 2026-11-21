@@ -1322,10 +1322,14 @@ async function latestRunOf(
   q: Queryable,
   agentId: string,
   conversationId: string,
-): Promise<(RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null }) | null> {
-  const { rows } = await q.query<RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null }>(
+): Promise<
+  (RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null; whisper_id: string | null }) | null
+> {
+  const { rows } = await q.query<
+    RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null; whisper_id: string | null }
+  >(
     `select ${RUN_COLUMNS}, r.covers_seq::text as covers, greatest(r.covers_seq, coalesce(r.pending_seq, 0))::text as answers, r.triggered_by, r.asker_ids,
-            r.call_seqs::text[] as calls
+            r.call_seqs::text[] as calls, r.whisper_id
        from agent_runs r
       where r.agent_id = $1 and r.conversation_id = $2 and r.purpose = 'reply' order by r.created_at desc, r.id desc limit 1`,
     [agentId, conversationId],
@@ -1405,7 +1409,7 @@ export async function retryRun(t: Tx, ownerId: string, conversationId: string, a
  * called the failed one (`triggered_by` kept: one an Agent's message called for is still an Agent's, so a member's
  * halt still ends it), and its owner's own whoever's the failed one was (its owner asked again) — answering the same
  * questions as the failed one, so whose they were is kept too (`asker_ids`: the retry asks nothing new), and so are the
- * calls (`call_seqs`). Not for an Agent that
+ * calls (`call_seqs`), and a told reply's whisper (`whisper_id`: it tells again). Not for an Agent that
  * is not in the group now, nor for a run from before it last joined; a run a halt or the Agent's leaving cancelled
  * (`halted`, `agent_removed`) did not fail: 400 like any other; 429 over the owner's own `agentRunsPerMinute`. Lock
  * order: the group's row → the Agent's → run rows → the owner's `accounts` row.
@@ -1425,6 +1429,8 @@ async function retryInGroup(t: Tx, ownerId: string, conversationId: string, agen
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
   const queued = await queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
   await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));
+  // A told reply (`告诉他们`, Task 8) is told again: the retry keeps its whisper, so it is shown the hits and offered no tools.
+  if (latest.whisper_id !== null) await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, latest.whisper_id]);
   return queued;
 }
 

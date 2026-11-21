@@ -47,10 +47,18 @@ export interface ToolDeps {
   /** The clock (`current_time`); default the wall clock. */
   now?: () => Date;
   /**
-   * Called when a search in a group found nothing there, with the run and the words (Task 8: whether to look elsewhere
-   * for the Agent's owner). It tells the model nothing. None: nothing is done.
+   * Called when a search in a group found nothing there, with the run and what it was asked (Task 8: whether to look
+   * elsewhere for the Agent's owner). It tells the model nothing. None: nothing is done.
    */
-  elsewhere?: (scope: RunScope, query: string) => void | Promise<void>;
+  elsewhere?: (scope: RunScope, ask: ElsewhereAsk) => void | Promise<void>;
+}
+
+/** What a search was asked, as it ran: the words (cleaned) and the filters (null: none). */
+export interface ElsewhereAsk {
+  term: string;
+  from: string | null;
+  before: string | null;
+  after: string | null;
 }
 
 /** The tools a reply is offered: the search (in a group, of that group only), the clock, the file. */

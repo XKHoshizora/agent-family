@@ -3,7 +3,10 @@
 // `placeWhispers`). Open: a small bubble with a lock, 只有你能看到, its text and the buttons it offers (告诉他们, 不用), one
 // decision at a time (`useDecision`), a refusal said on it. Answered or expired: a quiet line. One that offers no button
 // (it only tells, such as a model turned to plain chat, `tools_off`) has nothing to answer: it stays that note, with its
-// text, whatever its status. Following MemoryNotice.
+// text, whatever its status. An open `found_elsewhere` one shows what was found before its buttons (`hits`: where · who
+// · when, then the text, a long one folded with 展开), so that I see what I would tell. Only a stale answer
+// (`stale_whisper`) takes the buttons away; a refusal of the reply 告诉他们 would start (it is replying, paused, has no
+// model, too many replies a minute) says why and leaves them. Following MemoryNotice.
 import React, { useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { Lock } from "../icons.js";
@@ -14,6 +17,25 @@ import { useDecision } from "./AgentChatBits.jsx";
 export const WHISPER_DONE = { accepted: "已告诉他们", declined: "已忽略", expired: "已过期" };
 /** The line every open whisper starts with. */
 export const ONLY_YOU = "只有你能看到";
+/** A hit's text longer than this many characters is folded to a few lines (styles.css `.folded`), with 展开 / 收起. */
+export const HIT_FOLD_AT = 80;
+
+/** One thing a `found_elsewhere` whisper found: where · who · when, then what was said (React text only). */
+function Hit({ hit }) {
+  const [open, setOpen] = useState(false);
+  const long = [...hit.text].length > HIT_FOLD_AT;
+  return (
+    <li className="whisper-hit">
+      <p className="whisper-hit-meta">{[hit.where, hit.who, hit.when].join(" · ")}</p>
+      <p className={long && !open ? "whisper-hit-text folded" : "whisper-hit-text"}>{hit.text}</p>
+      {long && (
+        <button type="button" className="whisper-hit-more" onClick={() => setOpen((o) => !o)}>
+          {open ? "收起" : "展开"}
+        </button>
+      )}
+    </li>
+  );
+}
 
 /** One whisper of mine (`whisper`: a view of `conv.whispers`) in the conversation `conv`. */
 export function Whisper({ whisper, conv }) {
@@ -36,7 +58,7 @@ export function Whisper({ whisper, conv }) {
 
   const answer = async (key) => {
     const res = await decide(key, actions.answerWhisper(conv.id, whisper.id, key));
-    if (mounted.current && !res.ok && res.error?.status === 409) setStale(true);
+    if (mounted.current && !res.ok && res.error?.code === "stale_whisper") setStale(true);
   };
   const offers = (action) => !stale && whisper.actions.includes(action);
   return (
@@ -47,6 +69,13 @@ export function Whisper({ whisper, conv }) {
           {ONLY_YOU}
         </p>
         <p className="whisper-text">{whisper.text}</p>
+        {Array.isArray(whisper.hits) && whisper.hits.length > 0 && (
+          <ul className="whisper-hits">
+            {whisper.hits.map((hit, i) => (
+              <Hit key={i} hit={hit} />
+            ))}
+          </ul>
+        )}
         {(offers("tell") || offers("dismiss")) && (
           <div className="whisper-actions">
             {offers("tell") && (

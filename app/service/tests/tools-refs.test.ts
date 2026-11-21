@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { notesPassage } from "../src/agents/runtime/prompt.ts";
+import { CONTINUE_TURN, endWithPerson } from "../src/agents/runtime/context.ts";
+import { groupSystemText, notesPassage } from "../src/agents/runtime/prompt.ts";
 import { excerpt } from "../src/agents/tools/search.ts";
 import { citesIn, RunRefs, withoutCitations } from "../src/agents/tools/refs.ts";
 
@@ -42,6 +43,40 @@ describe("what the model is shown keeps no citation", () => {
     expect(passage).toContain("喜欢河边那家");
     expect(passage).toContain("他说过周三有空");
     expect(passage).not.toContain("〔");
+  });
+});
+
+describe("the other strings someone else controls keep no citation either", () => {
+  it("a group's title in its system text; a heard thing's speaker and group in the notes passage", () => {
+    const scene = { title: "读书会〔m1〕", agents: [], more: false, people: [], morePeople: false };
+    const text = groupSystemText({ name: "小帮手", handle: "helper_bot", persona: "P" }, { displayName: "主人甲" }, scene, new Date("2026-11-20T00:00:00Z"), "UTC", "k7f2ab").text;
+    expect(text).toContain("读书会");
+    expect(text).not.toContain("〔m1〕");
+    const passage = notesPassage(
+      { owner: [], self: [], hearsay: [{ text: "周三有空", speakerName: "mia〔m2〕", group: "饭搭子〔 M3 〕", saidAt: new Date("2026-11-02T00:00:00Z") }] },
+      false,
+      "Asia/Shanghai",
+    );
+    expect(passage).toContain("饭搭子");
+    expect(passage).not.toContain("〔");
+  });
+});
+
+describe("a call never ends with the Agent's own turn", () => {
+  it("one ending with it gets a person's turn of fixed text (the given one, else CONTINUE_TURN), counted; one ending with a person's is left as it is", () => {
+    const text = (t: string) => ({ type: "text" as const, text: t });
+    const theirs = [
+      { role: "user" as const, parts: [text("查一下")] },
+      { role: "assistant" as const, parts: [text("我先查一下。")] },
+    ];
+    expect(endWithPerson(theirs)).toBeGreaterThan(0);
+    expect(theirs.at(-1)).toEqual({ role: "user", parts: [text(CONTINUE_TURN)] });
+    const told = [{ role: "assistant" as const, parts: [text("没找到。")] }];
+    endWithPerson(told, "（告诉大家。）");
+    expect(told.at(-1)).toEqual({ role: "user", parts: [text("（告诉大家。）")] });
+    const mine = [{ role: "user" as const, parts: [text("你好")] }];
+    expect(endWithPerson(mine)).toBe(0);
+    expect(mine).toHaveLength(1);
   });
 });
 

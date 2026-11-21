@@ -999,7 +999,8 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
         text: whisperErrorText,
         onFail: (error) => {
           if (error.status === 404) setModel(dropWhisper(getModel(), conversationId, whisperId));
-          else if (error.status === 409) void refreshWhisper(conversationId, whisperId);
+          // Only a stale answer means the whisper changed; a refusal of the reply 告诉他们 would start leaves it open.
+          else if (error.code === "stale_whisper") void refreshWhisper(conversationId, whisperId);
         },
       }),
     /** The site's models again (Settings and the Agent form open). */

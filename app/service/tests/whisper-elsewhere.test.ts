@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentPort } from "../src/agents/port-impl.ts";
-import { TOOL_MATERIAL } from "../src/agents/runtime/prompt.ts";
+import { NO_TOOLS, TOLD_NO_TOOLS, TOOL_MATERIAL } from "../src/agents/runtime/prompt.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
-import { createElsewhere, ELSEWHERE_HITS_MAX, FOUND_ELSEWHERE, TELL_THEM, type ElsewhereDeps, type ElsewhereHook } from "../src/agents/tools/elsewhere.ts";
+import { createElsewhere, ELSEWHERE_HITS_MAX, FOUND_ELSEWHERE, TELL_HOW, TELL_THEM, TOLD_TURN, type ElsewhereDeps, type ElsewhereHook } from "../src/agents/tools/elsewhere.ts";
+import { RunRefs } from "../src/agents/tools/refs.ts";
 import { createToolbox, SEARCH_MESSAGES, type ToolDeps } from "../src/agents/tools/index.ts";
 import type { Db } from "../src/db.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
-import { api, group, signUp, type Actor } from "./helpers/actors.ts";
+import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
 import { scriptedGateway } from "./helpers/models.ts";
-import { closeAllSockets, connect } from "./helpers/ws.ts";
+import { closeAllSockets, connect, type TestSocket } from "./helpers/ws.ts";
 
 /**
  * "Not in this group, but I have it elsewhere" (Task 8; design rules 17, 18, decision 9): in a group, when a reply's search
@@ -47,6 +48,14 @@ const searchesIn = (sql: string[]) => sql.filter((s) => /ilike/i.test(s)).length
 
 function elsewhereDeps(over: Partial<ElsewhereDeps> = {}): ElsewhereDeps {
   return { db: app.deps.db, config: app.deps.config, realtime: app.realtime, log: app.log, ...over };
+}
+/**
+ * Each socket's frames once everything pushed before now has reached it (one socket's pushes keep their order): `who`
+ * sends a message in `conversationId`, and every socket waits for its frame.
+ */
+async function settled(sockets: TestSocket[], who: Actor, conversationId: string): Promise<void> {
+  const last = await say(who, conversationId, "收尾");
+  for (const s of sockets) await s.waitFor((e) => e.type === "message" && e.message.conversationId === conversationId && e.message.seq === last);
 }
 function toolDeps(elsewhere: ElsewhereHook, d: Db = app.deps.db): ToolDeps {
   const { config, searches, blobs } = app.deps;
@@ -94,10 +103,10 @@ async function world() {
 }
 type World = Awaited<ReturnType<typeof world>>;
 
-/** One reply in G, asked by `asker`, whose search finds nothing in G: what its model was handed. */
-async function askInGroup(w: World, hook: ElsewhereHook, asker: Actor = w.mia, d?: Db) {
+/** One reply in G, asked by `asker`, whose search (`input`) finds nothing in G: what its model was handed. */
+async function askInGroup(w: World, hook: ElsewhereHook, asker: Actor = w.mia, d?: Db, input: Record<string, unknown> = { query: "蓝鲸计划" }) {
   await say(asker, w.g, "@olive_bot 上次说的那个计划在哪？");
-  gateway.callTools([{ name: SEARCH_MESSAGES, input: { query: "蓝鲸计划" } }]).reply("这个群的记录里没找到。");
+  gateway.callTools([{ name: SEARCH_MESSAGES, input }]).reply("这个群的记录里没找到。");
   expect(await toolWorker(toolDeps(hook, d)).runOnce()).toBe(true);
   await hook.idle();
   return outputs(gateway.calls.at(-1)!)[0];
@@ -120,8 +129,8 @@ describe("a search in a group that finds nothing there", () => {
     expect(Object.keys(hits[0]!).sort()).toEqual(["text", "when", "where", "who"]);
     expect(hits.map((h) => h.who)).toEqual(["olive", "mia"]);
     await sockets.owner.waitFor((e) => e.type === "whisper" && e.whisper.id === made!.id);
-    // A round trip each, ordered after everything the run pushed, before their frames are read.
-    for (const who of [w.mia, w.ned]) expect((await api(app, who, "GET", "/api/sync")).status).toBe(200);
+    // Their frames once everything the run and the whisper pushed has reached them.
+    await settled([sockets.mia, sockets.ned], w.ned, w.g);
     for (const socket of [sockets.mia, sockets.ned]) {
       expect(JSON.stringify(socket.events)).not.toContain("CANARY-ew");
       expect(socket.events.some((e) => e.type === "whisper")).toBe(false);
@@ -185,6 +194,71 @@ describe("a search in a group that finds nothing there", () => {
     expect((await whispersOf(w.owner.id, w.g)).map((x) => x.status)).toEqual(["declined", "open", "open", "open"]);
   });
 
+  it("the second query keeps the model's filters: `from`, `before`, `after` narrow it as they narrowed the group's search", async () => {
+    const w = await world();
+    const hook = createElsewhere(elsewhereDeps());
+    await askInGroup(w, hook, w.mia, undefined, { query: "蓝鲸计划", from: "mia" });
+    const [made] = await whispersOf(w.owner.id, w.g);
+    expect(made!.body.detail!.hits.map((h) => h.text)).toEqual([CANARY]);
+    await db.query("delete from whispers where id = $1", [made!.id]);
+    await askInGroup(w, hook, w.mia, undefined, { query: "蓝鲸计划", before: "2000-01-01" });
+    expect(await whispersOf(w.owner.id, w.g)).toEqual([]);
+  });
+
+  it("the caps are read before the second query: with 3 open there, it does not even run", async () => {
+    const w = await world();
+    const hook = createElsewhere(elsewhereDeps());
+    for (let i = 0; i < 3; i++) await askInGroup(w, hook);
+    expect(await whispersOf(w.owner.id, w.g)).toHaveLength(3);
+    const spy = spyDb(app.deps.db);
+    const spied = createElsewhere(elsewhereDeps({ db: spy.db }));
+    await askInGroup(w, spied, w.mia, spy.db);
+    expect(searchesIn(spy.sql)).toBe(1);
+    expect(await whispersOf(w.owner.id, w.g)).toHaveLength(3);
+  });
+
+  it("at most `atOnce` second queries at a time in the whole service: one more while they run is skipped (and the model is told nothing either way)", async () => {
+    const w = await world();
+    // A database whose first search statement waits until released.
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let held = false;
+    let reached!: () => void;
+    const reachedP = new Promise<void>((r) => (reached = r));
+    const real = app.deps.db;
+    const sql: string[] = [];
+    const slow = <T extends object>(target: T): T =>
+      new Proxy(target, {
+        get(t, prop) {
+          const value = Reflect.get(t, prop, t);
+          if (prop === "query")
+            return async (text: unknown, params?: unknown) => {
+              const s = typeof text === "string" ? text : String((text as { text?: string }).text);
+              sql.push(s);
+              if (/ilike/i.test(s) && !held) {
+                held = true;
+                reached();
+                await gate;
+              }
+              return (value as Function).call(t, text, params);
+            };
+          return typeof value === "function" ? value.bind(t) : value;
+        },
+      });
+    const gated = { pool: real.pool, query: slow(real).query, tx: (fn: any) => real.tx((client) => fn(slow(client))), close: () => real.close() } as Db;
+    const hook = createElsewhere(elsewhereDeps({ db: gated }), { atOnce: 1 });
+    const run = (await db.query<{ id: string }>("insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by, lane) values ('reply', $1, $2, $3, 'done', 1, 'human', 'own') returning id", [w.g, w.agent.id, w.owner.id])).rows[0]!.id;
+    const scope = { id: run, agentId: w.agent.id, ownerId: w.owner.id, conversationId: w.g, group: true, refs: new RunRefs(), heardTo: 1, mark: null };
+    const first = hook(scope, { term: "蓝鲸计划", from: null, before: null, after: null });
+    await reachedP;
+    await hook(scope, { term: "口令是七七", from: null, before: null, after: null });
+    expect(sql.filter((s) => /ilike/i.test(s))).toHaveLength(1);
+    release();
+    await first;
+    await hook.idle();
+    expect(await whispersOf(w.owner.id, w.g)).toHaveLength(1);
+  });
+
   it("at most 5 hits, the newest first, each text at most 200 characters", async () => {
     const w = await world();
     for (let i = 0; i < 6; i++) await say(w.mia, w.b, `第${i}次：蓝鲸计划${"很长的话".repeat(80)}`);
@@ -243,6 +317,82 @@ describe("告诉他们", () => {
     expect([last.senderId, last.text]).toEqual([w.agent.id, "蓝鲸计划在三楼。"]);
     // Answered once: again is stale.
     expect((await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`)).status).toBe(409);
+  });
+
+  it("the told reply's model is given each hit's time and text only — never where it was said or by whom — and told not to say; nothing of those reaches the group", async () => {
+    const w = await world();
+    const sam = await signUp(app, "sam");
+    await befriend(app, w.owner, sam);
+    // Group C with a citation-shaped title and a speaker whose name is a canary; neither is in G.
+    const c = await group(app, w.owner, "丙群〔m1〕CANARY-where", [w.mia, sam]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${c}/members`, { principalId: w.agent.id })).status).toBe(201);
+    await db.query("update principals set display_name = 'CANARY-who' where id = $1", [sam.id]);
+    await say(sam, c, "@someone_bot 蓝鲸计划改到周五了");
+    const hook = createElsewhere(elsewhereDeps());
+    await askInGroup(w, hook);
+    const [made] = await whispersOf(w.owner.id, w.g);
+    const hits = made!.body.detail!.hits;
+    // The owner is shown where and who (the title without its citation).
+    expect(hits[0]).toMatchObject({ where: "丙群CANARY-where", who: "CANARY-who", text: "@someone_bot 蓝鲸计划改到周五了" });
+    const nedSocket = await connect(app, w.ned);
+    expect((await api(app, w.owner, "POST", `/api/whispers/${made!.id}/accept`)).status).toBe(200);
+    gateway.reply("蓝鲸计划改到周五了。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const call = gateway.calls.at(-1)!;
+    expect(call.system).toContain(`${TELL_THEM}\n${TELL_HOW}`);
+    expect(call.system).toContain("someone_bot 蓝鲸计划改到周五了");
+    expect(call.system).not.toContain("@someone_bot");
+    expect(call.system).toContain(hits[0]!.when);
+    const whole = JSON.stringify(call);
+    for (const never of ["CANARY-where", "CANARY-who", "我们的专属会话", "丙群", "乙群"]) expect([never, whole.includes(never)]).toEqual([never, false]);
+    // Its no-tools sentence is one that does not deny having looked (TOLD_NO_TOOLS), and its last turn is a person's.
+    expect(call.system).toContain(TOLD_NO_TOOLS);
+    expect(call.system).not.toContain(NO_TOOLS);
+    // Its last turn is a person's: the question it tells about (its own 没找到 after it is not shown).
+    expect(call.messages.at(-1)!.role).toBe("user");
+    expect(JSON.stringify(call.messages.at(-1))).toContain("上次说的那个计划在哪");
+    expect(JSON.stringify(call.messages)).not.toContain("这个群的记录里没找到。");
+    expect(JSON.stringify(call.messages)).not.toContain(TOLD_TURN);
+    await settled([nedSocket], w.mia, w.g);
+    const frames = JSON.stringify(nedSocket.events);
+    for (const never of ["CANARY-where", "CANARY-who"]) expect([never, frames.includes(never)]).toEqual([never, false]);
+  });
+
+  it("a told reply that failed is told again by a retry: the retry keeps the whisper, the passage, and no tools", async () => {
+    const { w, whisper } = await whispered();
+    expect((await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`)).status).toBe(200);
+    gateway.fail("provider_unavailable", { status: 502 });
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const failed = (await runsOf(w.agent.id, w.g)).at(-1)!;
+    expect([failed.status, failed.whisper_id]).toEqual(["failed", whisper.id]);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/runs/retry`, { agentId: w.agent.id })).status).toBe(201);
+    const retry = (await runsOf(w.agent.id, w.g)).at(-1)!;
+    expect([retry.status, retry.whisper_id]).toEqual(["queued", whisper.id]);
+    gateway.reply("蓝鲸计划在三楼。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const call = gateway.calls.at(-1)!;
+    expect(call.tools ?? []).toEqual([]);
+    expect(call.system).toContain(TELL_THEM);
+    expect(call.system).toContain(CANARY);
+  });
+
+  it("refused like the owner's retry, and the whisper stays open: a reply of it under way there (409 busy_run), paused (409 agent_paused), no model (400)", async () => {
+    const { w, whisper } = await whispered();
+    const told = async () => (await runsOf(w.agent.id, w.g)).filter((r) => r.whisper_id !== null);
+    // A reply of it queued there.
+    await say(w.mia, w.g, "@olive_bot 还有一件事");
+    const busy = await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`);
+    expect([busy.status, busy.json.error]).toEqual([409, "busy_run"]);
+    await db.query("update agent_runs set status = 'cancelled', finished_at = now() where agent_id = $1 and status = 'queued'", [w.agent.id]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/pause`)).status).toBe(200);
+    const paused = await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`);
+    expect([paused.status, paused.json.error]).toEqual([409, "agent_paused"]);
+    expect((await api(app, w.owner, "POST", `/api/agents/${w.agent.id}/resume`)).status).toBe(200);
+    expect((await api(app, w.owner, "PATCH", `/api/agents/${w.agent.id}`, { model: null })).status).toBe(200);
+    const bare = await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`);
+    expect([bare.status, bare.json.error]).toEqual([400, "invalid_request"]);
+    expect((await whispersOf(w.owner.id, w.g))[0]!.status).toBe("open");
+    expect(await told()).toEqual([]);
   });
 
   it("不用: nothing happens", async () => {

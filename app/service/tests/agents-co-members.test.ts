@@ -66,6 +66,8 @@ const HIDDEN_KEYS = [
   "memoryAsk",
   "sharedNotes",
   "whisperElsewhere",
+  "whisperId",
+  "whisper_id",
   "newNotes",
   "memoryModel",
   "memoryModelUsable",
