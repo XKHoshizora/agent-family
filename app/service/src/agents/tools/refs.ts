@@ -61,8 +61,13 @@ const CITATION = /〔\s*([mMfF])\s*([1-9][0-9]{0,5})\s*〕/g;
  * not write in its own run goes through (I-2: a number means something only in the run that gave it, so an earlier
  * reply's `〔m1〕` copied into this one would link whatever this run's `m1` is) — earlier messages and their quotes in
  * its context, the files it reads, what its searches and its memory show it — and an acknowledgement, which cites nothing.
+ * Taken out until none is left: one built around another (`〔m〔m1〕1〕`) leaves no citation behind.
  */
-export const withoutCitations = (text: string): string => text.replace(CITATION, "");
+export function withoutCitations(text: string): string {
+  let out = text;
+  for (let next = out.replace(CITATION, ""); next !== out; next = out.replace(CITATION, "")) out = next;
+  return out;
+}
 
 /**
  * A reply's text with its citations checked against `refs` (design rule 4): a `〔mN〕` whose number this run gave a message

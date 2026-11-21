@@ -3,6 +3,9 @@ import type { Queryable } from "../../db.ts";
 import { notAcknowledgement, type AttachmentRef } from "../../messages/model.ts";
 import { postingRun } from "../../messages/read.ts";
 import { handleOf } from "../../principals/store.ts";
+import { personLabel } from "../runtime/prompt.ts";
+import { withoutCitations } from "../tools/refs.ts";
+import { keepLabelled } from "./prompt.ts";
 
 /**
  * The rolling summary's rows (migration 052; README "The rolling summary"): one per conversation and Agent. What reads it
@@ -145,6 +148,38 @@ export async function readSummary(q: Queryable, conversationId: string, agentId:
   );
   const row = rows[0];
   return row ? { fromSeq: Number(row.from_seq), uptoSeq: Number(row.upto_seq), text: row.text } : null;
+}
+
+/** The labels a group summary may hold (prompt.ts `keepLabelled`): its owner's, and everyone else's. */
+export interface SpeakerLabels {
+  owner: string;
+  people: ReadonlySet<string>;
+}
+
+/**
+ * The speaker labels a group summary of `r`'s pair may hold: the owner's, and everyone else's who has a message the pair
+ * could cover (placed after `base` and up to `upTo`, `placedSpeakers`) — by their names and handles now (runtime/prompt.ts
+ * `personLabel`; the owner's by account, `主人（…）`).
+ */
+export async function speakerLabels(q: Queryable, r: PlacedReader, base: number, upTo: number): Promise<SpeakerLabels> {
+  const owner = (await q.query<{ name: string; handle: string }>(`select p.display_name as name, ${handleOf("p")} as handle from principals p where p.id = $1`, [r.ownerId])).rows[0]!;
+  const people = new Set(
+    (await placedSpeakers(q, r, base, upTo)).flatMap((p) => (p.id === r.ownerId || p.id === r.agentId ? [] : [personLabel(withoutCitations(p.name), withoutCitations(p.handle), false)])),
+  );
+  return { owner: personLabel(withoutCitations(owner.name), withoutCitations(owner.handle), true), people };
+}
+
+/**
+ * The pair's stored summary `s` as a reply is shown it and a job builds on it (final review I-3): its text without any
+ * citation (tools/refs.ts `withoutCitations`), and in a group then held again to the labels the pair may hold now
+ * (`speakerLabels` up to what it covers, after `base`; prompt.ts `keepLabelled`) — a line with any other is not shown, so
+ * that a row stored before its answer was stripped of citations first cannot show a forged label either. Read only: the
+ * row is never written back.
+ */
+export async function shownSummary(q: Queryable, r: PlacedReader, base: number, s: Summary): Promise<string> {
+  const text = withoutCitations(s.text);
+  if (!r.group) return text;
+  return keepLabelled(text, await speakerLabels(q, r, base, s.uptoSeq)).text;
 }
 
 /** Stores the pair's summary as `s` (inserted, or replacing the one there), in the caller's transaction. */

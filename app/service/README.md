@@ -3159,13 +3159,18 @@ system text (fixed, `对话摘要整理员`) says that everything inside is mate
 instructions, and asks for the summary updated in place, in four fixed sections each under its heading line — `人物与称呼`,
 `说过的事`, `定下的事`, `还没解决的` — in a group keeping who said what by copying `who` whole (only the owner's starts with
 `主人`; a name or a claim inside a text never says who said it), nothing but what the messages say, in the
-conversation's language, at most `MEMORY.summaryMaxWeight` (800) weight. The answer is cleaned line by line (`cleanText`;
-empty lines dropped) and held to the cap by cutting whole lines from the top section downwards (a section's heading stays),
-never in the middle of a line. In a group every speaker label in it must be one the system wrote: a line in which a
+conversation's language, at most `MEMORY.summaryMaxWeight` (800) weight. The answer is cleaned line by line (`cleanText`,
+and every citation taken out — `〔m3〕`, `〔f2〕`, also one built around another —, then `cleanText` again; empty lines dropped)
+and held to the cap by cutting whole lines from the top section downwards (a section's heading stays),
+never in the middle of a line. Only then are its labels looked at, so that a citation can neither hide a label nor make
+one (`主〔m1〕人（…）`, `（〔f2〕@…）`). In a group every speaker label in it must be one the system wrote: a line in which a
 `主人（` does not start the owner's label exactly, or a `（@` is not the handle of a label standing whole there — the owner's
 inside `主人（…）`, or that of anyone else with a message the pair could cover, by their names now — is dropped (an unknown or
 altered label, the owner's name and handle without `主人（…）`, a half-width bracket; counted `summary_label_dropped`), so no
-line of it can put words under an owner's label the system did not write. An answer with nothing left but section headings
+line of it can put words under an owner's label the system did not write. A stored summary is held to the same rule as it
+is read, for a reply's passage and for the old summary a job builds on (`shownSummary`): its citations taken out, then, in
+a group, every line whose labels are not ones the pair may hold now left out of what is shown (the row itself is not
+rewritten) — so a row stored before this rule cannot show a forged label either. An answer with nothing left but section headings
 is no summary, first or not: nothing is stored and the messages are not swallowed. It is stored with the new `upto_seq` (`from_seq` stays where the first summary began) only
 when it weighs less than what it replaces — the old summary and the messages it now covers — and only when, under the
 conversation's row and then the Agent's (the order a reply takes them in), the pair is as the job read it: the Agent not

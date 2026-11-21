@@ -8,7 +8,7 @@ import { personLabel, speakerRole } from "../runtime/prompt.ts";
 import { liveAgent, lockAgent } from "../store.ts";
 import { withoutCitations } from "../tools/refs.ts";
 import { cleanSummary, hasContent, keepLabelled, OWNER, SELF, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
-import { countPlaced, placedSpeakers, readPlaced, readSummary, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
+import { countPlaced, readPlaced, readSummary, shownSummary, speakerLabels, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
 
 /**
  * One rolling-summary job (README "The rolling summary"; queued after a reply by agents/port-impl.ts `finish`, run by the
@@ -114,6 +114,8 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   // least `reviewMessages` of them, which the configuration holds to at least `summaryMinMessages`: it is not asked again).
   if (!cut && taken.length < memory.summaryMinMessages) return;
   const next: Omit<Summary, "text"> = { fromSeq: old?.fromSeq ?? read[0]!.at, uptoSeq: upto };
+  // The old summary as a reply is shown it (store.ts `shownSummary`): what the call builds on.
+  const before = old === null ? null : await shownSummary(db, reader, base, old);
 
   count(db, "summary_run");
   const report: MemoryCallReport = { answered: false };
@@ -122,13 +124,14 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
     agent.ownerId,
     {
       system: summarySystem(reader.group, memory.summaryMaxWeight),
-      user: summaryInput(old === null ? null : withoutCitations(old.text), taken),
+      user: summaryInput(before, taken),
       maxOutputTokens: Math.max(memory.reviewMaxOutputTokens, 2 * memory.summaryMaxWeight),
     },
     ctx.closing,
     report,
   );
   if (ctx.closing.aborted) return;
+  // Cleaned, and without any citation, before its labels are looked at (prompt.ts `cleanSummary`).
   const cleaned = answer === null ? null : cleanSummary(answer, memory.summaryMaxWeight);
   // In a group every speaker label must be one the system wrote: a line with any other goes (counted).
   let labelled = cleaned;
@@ -138,7 +141,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
     labelled = kept.text;
   }
   // Headings and nothing else are no summary: never stored, and the messages are not swallowed.
-  const text = labelled !== null && hasContent(labelled) ? withoutCitations(labelled) : null;
+  const text = labelled !== null && hasContent(labelled) ? labelled : null;
   if (text === null) {
     // A refusal for the allowance is counted where it is decided (`memory_refused_allowance`).
     if (!report.refused) count(db, "summary_failed");
@@ -147,7 +150,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
     return;
   }
   // Shorter than what it replaces — the old summary and the messages it now covers — or not at all.
-  if (weight(text) >= weight(old?.text ?? "") + taken.reduce((sum, l) => sum + weight(l.text), 0)) {
+  if (weight(text) >= weight(before ?? "") + taken.reduce((sum, l) => sum + weight(l.text), 0)) {
     count(db, "summary_not_shorter");
     ctx.summaryAttempted(job.upTo);
     return;
@@ -176,19 +179,6 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
   }
   count(db, "summary_written");
   ctx.summaryAttempted(null);
-}
-
-/**
- * The speaker labels a group summary may hold (prompt.ts `keepLabelled`): the owner's, and everyone else's who has a message
- * the pair could cover (placed after `base` and up to `upTo`) — by their names and handles now (runtime/prompt.ts
- * `personLabel`). Counted: how many lines of an answer went (`summary_label_dropped`).
- */
-async function speakerLabels(db: SummaryDeps["db"], reader: PlacedReader, base: number, upTo: number): Promise<{ owner: string; people: Set<string> }> {
-  const owner = (await db.query<{ name: string; handle: string }>("select display_name as name, handle::text as handle from principals where id = $1", [reader.ownerId])).rows[0]!;
-  const people = new Set(
-    (await placedSpeakers(db, reader, base, upTo)).flatMap((p) => (p.id === reader.ownerId || p.id === reader.agentId ? [] : [personLabel(withoutCitations(p.name), withoutCitations(p.handle), false)])),
-  );
-  return { owner: personLabel(withoutCitations(owner.name), withoutCitations(owner.handle), true), people };
 }
 
 const sameSummary = (a: Summary | null, b: Summary | null): boolean =>

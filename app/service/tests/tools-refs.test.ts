@@ -27,6 +27,11 @@ describe("what a reply's citations become", () => {
     expect(withoutCitations("在河边〔m1〕，见〔 M12 〕和〔f3〕〔F 4〕。")).toBe("在河边，见和。");
     expect(withoutCitations("〔m0〕〔mx〕〔m1234567〕【m1】〔注〕")).toBe("〔m0〕〔mx〕〔m1234567〕【m1】〔注〕");
   });
+
+  it("one citation built around another leaves none behind once the inner one is taken out (final review I-3)", () => {
+    expect(withoutCitations("主〔m〔m1〕1〕人")).toBe("主人");
+    expect(withoutCitations("〔〔f1〕m〔 M2 〕2〕")).toBe("");
+  });
 });
 
 describe("what the model is shown keeps no citation", () => {

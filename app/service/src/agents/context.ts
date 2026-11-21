@@ -28,7 +28,7 @@ import {
   type SystemText,
 } from "./runtime/prompt.ts";
 import type { AgentRow } from "./store.ts";
-import { baseOf, countPlaced, readSummary, stayOf, type Summary } from "./summary/store.ts";
+import { baseOf, countPlaced, readSummary, shownSummary, stayOf, type PlacedReader, type Summary } from "./summary/store.ts";
 import {
   attachmentLabel,
   ContextPlan,
@@ -537,8 +537,10 @@ export async function loadContext(
   const base = baseOf(stay);
   const owned = stored !== null && base !== null && stored.fromSeq > base ? stored : null;
   const summary = owned !== null && owned.fromSeq > line && owned.uptoSeq < run.coversSeq ? owned : null;
+  const reader: PlacedReader = { agentId: run.agentId, ownerId: run.ownerId, conversationId: run.conversationId, group: run.group !== null };
   const carrying = (text: string | null) => (mark: string, speakers: readonly Speaker[]): SystemText => withSummary(system(mark, speakers), text);
-  const withPassage = carrying(summary === null ? null : withoutCitations(summary.text));
+  // Shown as summary/store.ts `shownSummary` has it: without citations, and in a group only the lines whose labels the pair may hold.
+  const withPassage = carrying(summary === null ? null : await shownSummary(q, reader, base!, summary));
   const reading = budgetWith(withPassage("", []));
   // In a group, nothing at or before the asker's line either (`askerLine`): what is read starts after the later of the two;
   // with a summary shown, after what it covers.
@@ -589,7 +591,6 @@ export async function loadContext(
     // Counted in two parts, so that no read reaches past `to`: what is stored at or before it, and what was loaded after it
     // (every message after it is among those loaded) whose place is not.
     const late = loaded.filter((l) => l.seq > to && l.answers > after && l.answers <= to).length;
-    const reader = { agentId: run.agentId, ownerId: run.ownerId, conversationId: run.conversationId, group: run.group !== null };
     const messages = (await countPlaced(q, reader, after, to, to)) + late;
     if (messages > 0) leftOut = { to, messages };
   }
