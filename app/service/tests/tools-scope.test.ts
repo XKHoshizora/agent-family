@@ -4,6 +4,7 @@ import { createAgentPort } from "../src/agents/port-impl.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
 import { createToolbox, READ_FILE, runTool, SEARCH_MESSAGES, type RunScope, type ToolDeps } from "../src/agents/tools/index.ts";
 import { RunRefs } from "../src/agents/tools/refs.ts";
+import { TOOL_MATERIAL } from "../src/agents/runtime/prompt.ts";
 import type { Db } from "../src/db.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
@@ -208,6 +209,59 @@ describe("a group reply never sees past its asker's line", () => {
     expect(fromMia.results.map((r) => r.text)).toEqual(["早期：蓝鲸计划的地点在三楼"]);
     expect(early).toBeGreaterThan(0);
   });
+
+  it("a call at or before the line is found by its text only, never by its file's name (it is shown as its text only)", async () => {
+    const w = await world();
+    const uploaded = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${w.a}/attachments`,
+      headers: { cookie: w.mia.cookie, "content-type": MULTIPART },
+      payload: multipart([{ name: "file", filename: "预算表-m3.txt", type: "application/octet-stream", data: "三万" }]),
+    });
+    expect((await api(app, w.mia, "POST", `/api/conversations/${w.a}/messages`, { attachmentId: uploaded.json().id, text: "@scope_bot 看看这个", clientTxn: `ts${++txn}` })).status).toBe(201);
+    // Sam, who joins after Mia's call, is among whom the reply answers: the line is Sam's joining.
+    const sam = await signUp(app, "sam");
+    await befriend(app, w.owner, sam);
+    expect((await api(app, w.owner, "POST", `/api/conversations/${w.a}/members`, { principalId: sam.id })).status).toBe(201);
+    const run = (await db.query<{ id: string }>("select id from agent_runs where agent_id = $1 and conversation_id = $2 and status = 'queued'", [w.agent.id, w.a])).rows[0]!.id;
+    await db.query("update agent_runs set asker_ids = array[$2::uuid, $3::uuid] where id = $1", [run, w.mia.id, sam.id]);
+    const scope: RunScope = { id: run, agentId: w.agent.id, ownerId: w.owner.id, conversationId: w.a, group: true, refs: new RunRefs(), heardTo: await conversationSeq(w.a), mark: null };
+    const signal = new AbortController().signal;
+    const byName = await runTool(deps(), scope, { id: "c1", name: SEARCH_MESSAGES, input: { query: "预算表-m3" } }, signal);
+    expect(byName.output).toEqual({ results: [], note: "这个群的记录里没找到。" });
+    const byText = await runTool(deps(), scope, { id: "c2", name: SEARCH_MESSAGES, input: { query: "看看这个" } }, signal);
+    expect((byText.output as { results: unknown[] }).results).toEqual([{ ref: "m1", who: "mia｜群成员", when: expect.any(String), text: "@scope_bot 看看这个" }]);
+  });
+
+  it("nothing written after the reply began is found (heardTo), however well it matches", async () => {
+    const w = await world();
+    await say(w.mia, w.a, "@scope_bot 蓝鲸计划在哪？");
+    const run = (await db.query<{ id: string }>("select id from agent_runs where agent_id = $1 and conversation_id = $2 and status = 'queued'", [w.agent.id, w.a])).rows[0]!.id;
+    const heardTo = await conversationSeq(w.a);
+    await say(w.ned, w.a, "后来才说：蓝鲸计划在五楼");
+    const scope: RunScope = { id: run, agentId: w.agent.id, ownerId: w.owner.id, conversationId: w.a, group: true, refs: new RunRefs(), heardTo, mark: null };
+    const out = await runTool(deps(), scope, { id: "c1", name: SEARCH_MESSAGES, input: { query: "蓝鲸计划" } }, new AbortController().signal);
+    expect((out.output as { results: Array<{ text: string }> }).results.map((r) => r.text)).toEqual(["@scope_bot 蓝鲸计划在哪？"]);
+  });
+
+  it("an Agent taken out of a group and added back finds there only what came after it came back, from its own conversation or in the group", async () => {
+    const w = await world();
+    await say(w.mia, w.a, "第一次在时：蓝鲸计划甲");
+    expect((await api(app, w.owner, "DELETE", `/api/conversations/${w.a}/members/${w.agent.id}`)).status).toBe(200);
+    await say(w.mia, w.a, "不在时：蓝鲸计划乙");
+    await addAgent(w.owner, w.a, w.agent.id);
+    await say(w.mia, w.a, "回来后：蓝鲸计划丙");
+    await say(w.owner, w.own, "查查那个计划");
+    gateway.callTools([{ name: SEARCH_MESSAGES, input: { query: "蓝鲸计划" } }]).reply("好。");
+    expect(await toolWorker().runOnce()).toBe(true);
+    const [fromOwn] = outputs(gateway.calls.at(-1)!) as [{ results: Array<{ text: string; where?: string }> }];
+    expect(fromOwn.results.filter((r) => r.where === "甲群").map((r) => r.text)).toEqual(["回来后：蓝鲸计划丙"]);
+    await say(w.mia, w.a, "@scope_bot 蓝鲸计划呢？");
+    gateway.callTools([{ name: SEARCH_MESSAGES, input: { query: "蓝鲸计划" } }]).reply("好。");
+    expect(await toolWorker().runOnce()).toBe(true);
+    const [inGroup] = outputs(gateway.calls.at(-1)!) as [{ results: Array<{ text: string }> }];
+    expect(inGroup.results.map((r) => r.text)).toEqual(["@scope_bot 蓝鲸计划呢？", "回来后：蓝鲸计划丙"]);
+  });
 });
 
 describe("a file is read only where it may be", () => {
@@ -233,7 +287,7 @@ describe("a file is read only where it may be", () => {
     const hit = (found.output as { results: Array<{ file?: { ref: string; name: string } }> }).results.find((r) => r.file);
     expect(hit?.file).toEqual({ ref: "f1", name: "蓝鲸计划.txt" });
     const there = await runTool(deps(), own, { id: "c2", name: READ_FILE, input: { file: "f1" } }, signal);
-    expect(there.output).toEqual({ name: "蓝鲸计划.txt", text: "第一行：蓝鲸计划\n第二行：预算三万", from: 0, next: null });
+    expect(there.output).toEqual({ about: TOOL_MATERIAL, name: "蓝鲸计划.txt", from: 0, next: null, text: "第一行：蓝鲸计划\n第二行：预算三万" });
 
     const inA = await scopeOf(w, w.a, true, refs);
     const refused = await runTool(deps(), inA, { id: "c3", name: READ_FILE, input: { file: "f1" } }, signal);

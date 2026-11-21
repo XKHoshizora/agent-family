@@ -104,7 +104,8 @@ export interface SearchRowsOptions {
   timeZone: string;
   /**
    * In `conversationId` only what a group reply may be shown (agents/context.ts `askerLine`): messages after `after` and
-   * at most `upTo` (what the reply had heard when it began), and the calls it answers (`calls`, whatever their seq).
+   * at most `upTo` (what the reply had heard when it began), and the calls it answers (`calls`, whatever their seq) — one
+   * at or before `after` by its text only, never by its file's name (the reply is shown such a call as its text only).
    * Null: the whole of every conversation searched.
    */
   window: { conversationId: string; after: number; upTo: number; calls: readonly number[] } | null;
@@ -149,7 +150,8 @@ export async function searchRows(q: Queryable, readerId: string, o: SearchRowsOp
         and ($4::text is null or lower(sp.handle::text) = lower($4::text) or sp.display_name = $4::text)
         and ($5::date is null or m.created_at < ($5::date)::timestamp at time zone $7::text)
         and ($6::date is null or m.created_at >= ($6::date + 1)::timestamp at time zone $7::text)
-        and ($8::uuid is null or m.conversation_id <> $8::uuid or (m.seq > $9::bigint and m.seq <= $10::bigint) or m.seq = any($11::bigint[]))
+        and ($8::uuid is null or m.conversation_id <> $8::uuid or (m.seq > $9::bigint and m.seq <= $10::bigint)
+             or (m.seq = any($11::bigint[]) and (m.seq > $9::bigint or (m.body ->> 'text') ilike $3 escape '\\')))
       order by m.created_at desc, m.conversation_id desc, m.seq desc
       limit $12`,
     [

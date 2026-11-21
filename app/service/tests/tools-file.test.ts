@@ -5,6 +5,7 @@ import { createToolbox, READ_FILE, runTool, type ToolDeps } from "../src/agents/
 import { RunRefs } from "../src/agents/tools/refs.ts";
 import { weight } from "../src/metering/tokens.ts";
 import type { ModelCall } from "../src/models/gateway.ts";
+import { TOOL_MATERIAL } from "../src/agents/runtime/prompt.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useProbeBlobs } from "./helpers/blobs.ts";
@@ -104,7 +105,7 @@ describe("reading a file", () => {
     const { owner, own } = await owned();
     await sendFile(owner, own, "notes.txt", "第一行\nsecond line\n");
     const out = await readOnce(owner, own, "读一下那个文件", { file: "f1" });
-    expect(out).toEqual({ name: "notes.txt", text: "第一行\nsecond line\n", from: 0, next: null });
+    expect(out).toEqual({ about: TOOL_MATERIAL, name: "notes.txt", from: 0, next: null, text: "第一行\nsecond line\n" });
   });
 
   it("a long one in pages: each at most resultMaxWeight, with where to go on (`next`) and a note while more remains; read on with `from` to the end", async () => {
@@ -153,6 +154,33 @@ describe("reading a file", () => {
     expect(await readOnce(owner, own, "从后面读", { file: "f1", from: 5 })).toEqual({ error: "from 超出了文件的长度。" });
   });
 
+  it("a page says first that it is material (`about`: TOOL_MATERIAL), then its name, where it starts, where to go on and the note, the text last — so a cut keeps them", async () => {
+    const { owner, own } = await owned();
+    const text = Array.from({ length: 60 }, (_, i) => `第${i}段：一些内容。`).join("\n");
+    await sendFile(owner, own, "long.txt", text);
+    const small = deps({ config: { ...app.deps.config, tools: { ...app.deps.config.tools, resultMaxWeight: 200 } } });
+    const out = await readOnce(owner, own, "读", { file: "f1" }, small);
+    expect(Object.keys(out)).toEqual(["about", "name", "from", "next", "note", "text"]);
+    expect(out.about).toBe(TOOL_MATERIAL);
+  });
+
+  it("a negative `from`: an error of its own", async () => {
+    const { owner, own } = await owned();
+    await sendFile(owner, own, "short.txt", "短");
+    expect(await readOnce(owner, own, "从前面读", { file: "f1", from: -1 })).toEqual({ error: "from 要写 0 或更大的整数。" });
+  });
+
+  it("a file keeps no citation, read by the tool or shown in the context, in its text or its name: a number means something only in its own run", async () => {
+    const { owner, own } = await owned();
+    await sendFile(owner, own, "引用〔m3〕.txt", "第一行〔m1〕\n第二行〔 F2 〕结束");
+    const out = await readOnce(owner, own, "读一下", { file: "f1" });
+    expect([out.name, out.text]).toEqual(["引用.txt", "第一行\n第二行结束"]);
+    const shown = JSON.stringify(gateway.calls.at(-1)!.messages);
+    expect(shown).toContain("引用.txt");
+    expect(shown).toContain("第一行\\n第二行结束");
+    expect(shown).not.toContain("〔");
+  });
+
   it("in a group, a file from before the run's asker's line is not read, whatever number is given for it", async () => {
     const [owner, mia] = [await signUp(app, "owen"), await signUp(app, "mia")];
     const agent = await mustCreateAgent(app, owner, { handle: "owen_bot", name: "小助手", model: FAST, persona: "简短地回答。" });
@@ -175,6 +203,6 @@ describe("reading a file", () => {
     const after = refs.file(later.id);
     const heardNow = Number((await db.query<{ seq: string }>("select seq::text from conversations where id = $1", [g])).rows[0]!.seq);
     const read = await runTool(deps(), { ...scope, heardTo: heardNow }, { id: "c2", name: READ_FILE, input: { file: after } }, new AbortController().signal);
-    expect(read.output).toEqual({ name: "later.txt", text: "后来的文件内容", from: 0, next: null });
+    expect(read.output).toEqual({ about: TOOL_MATERIAL, name: "later.txt", from: 0, next: null, text: "后来的文件内容" });
   });
 });

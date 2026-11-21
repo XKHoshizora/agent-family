@@ -73,8 +73,8 @@ function useShownKind(view, kind) {
   }, [view, kind]);
 }
 
-/** A plain result as shown: the text, with the note when it was too complex or too slow. */
-const plainOf = (text, result) => (withNote(result) ? <PlainWithNote text={text} /> : text);
+/** A plain result as shown: the text with what it cites (cites.jsx), and the note when it was too complex or too slow. */
+const plainOf = (text, result) => (withNote(result) ? <PlainWithNote text={text} /> : <CitedText text={text} />);
 
 /**
  * Shows `rendered` elements of a tree if the conversation's budget allows (it may push others far from view back to
@@ -167,7 +167,7 @@ export const AgentText = memo(function AgentText({ text, id = null }) {
     body = plainOf(shown, result);
     kind = withNote(result) ? "note" : "plain";
   } else if (result?.tree && granted) {
-    body = <Rich tree={result.tree} plain={shown} view={view} />;
+    body = <Rich tree={result.tree} plain={<CitedText text={shown} />} view={view} />;
     kind = "rich";
   }
   useShownKind(view, kind);

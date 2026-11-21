@@ -10,6 +10,7 @@ import { postingRun } from "../messages/read.ts";
 import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { renderProposalBlock } from "./persona.ts";
+import { withoutCitations } from "./tools/refs.ts";
 import {
   GROUP_AGENTS_NAMED,
   GROUP_PEOPLE_NAMED,
@@ -331,7 +332,7 @@ interface MessageRow {
 /** An attachment as the context shows it; with `fileRef` (a reply offered tools), with its number. */
 const toAttachment = (a: AttachmentRef, fileRef?: (attachmentId: string) => string): ContextAttachment => ({
   id: a.id,
-  name: a.name,
+  name: withoutCitations(a.name),
   image: a.inline === true,
   ...(fileRef ? { ref: fileRef(a.id) } : {}),
 });
@@ -365,7 +366,8 @@ const inGroupNow = (ms: string): string =>
  * read for a block again. (A reply in a group never proposes: nothing is looked up there.) In a group a quote of a
  * message at or before the asker's line (`ContextRun.group.after`) is left out as one the Agent cannot see is: the
  * quoting message's own text only; and the calls the run answers (`ContextRun.group.calls`) belong whatever `from` is,
- * one at or before `from` as its text only (no attachment: it is not read).
+ * one at or before `from` as its text only (no attachment: it is not read). No citation (`〔m3〕`) is shown, in a text, a
+ * quote or a file's name (tools/refs.ts `withoutCitations`): a number means something only in the run that gave it.
  * `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -405,7 +407,7 @@ async function loadPage(
       [run.agentId, run.conversationId, quotedSeqs, run.group?.after ?? 0],
     );
     for (const r of quoted.rows) {
-      const shown = r.text ? r.text : r.attachment ? attachmentLabel(toAttachment(r.attachment, run.fileRef)) : "";
+      const shown = r.text ? withoutCitations(r.text) : r.attachment ? attachmentLabel(toAttachment(r.attachment, run.fileRef)) : "";
       if (shown !== "") quotes.set(Number(r.seq), shown);
     }
   }
@@ -414,7 +416,7 @@ async function loadPage(
     if (role === null) return [];
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
     const seq = Number(r.seq);
-    let text = entryText(r.text ?? "", quoted);
+    let text = entryText(withoutCitations(r.text ?? ""), quoted);
     if (role === "assistant" && r.proposal_persona !== null) {
       const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
       text = text === "" ? block : `${text}\n\n${block}`;
@@ -703,7 +705,7 @@ export async function buildContext(
       const max = Math.min(found.size, maxChars * UTF8_MAX_BYTES_PER_CHAR, plan.bytesLeft);
       const got = await read(attachment, found.blobKey, max, startsLikeText);
       const text = got ? fileText(got.data, got.complete, maxChars) : null;
-      if (text) plan.offer(slot, { type: "text", text: withoutMark(text.text, loaded.mark), chars: text.chars });
+      if (text) plan.offer(slot, { type: "text", text: withoutCitations(withoutMark(text.text, loaded.mark)), chars: text.chars });
     }
   }
 

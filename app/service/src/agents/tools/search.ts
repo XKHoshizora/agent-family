@@ -5,9 +5,10 @@ import { cutToWeight, lastToWeight, weight } from "../../metering/tokens.ts";
 import type { ToolSpec } from "../../models/gateway.ts";
 import { askerLine, callsSeen } from "../context.ts";
 import type { ToolOutcome } from "../runtime/port.ts";
-import { cleanText, labelName, NO_GROUP_TITLE, oneLine, withoutMark } from "../runtime/prompt.ts";
+import { cleanText, labelName, NO_GROUP_TITLE, oneLine, TOOL_MATERIAL, withoutMark } from "../runtime/prompt.ts";
 import { siteDateTime, siteWeekday } from "./clock.ts";
 import type { RunScope, ToolDeps } from "./index.ts";
+import { withoutCitations } from "./refs.ts";
 
 /**
  * The search tool (README "Agents and runs", Tools in a reply; design rules 1–4): the messages a reply's Agent can find
@@ -92,11 +93,16 @@ function sender(from: string | undefined): string | null {
   return name === "" ? null : name;
 }
 
+/** Where `term` first is in `text`, case ignored (on `text` itself: a lower-cased copy may differ in length); -1 when nowhere. */
+function findIn(text: string, term: string): number {
+  return text.search(new RegExp(term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"), "iu"));
+}
+
 /** `text` as a result shows it: on one line, and when heavier than `EXCERPT_MAX_WEIGHT` cut around where `term` is in it. */
 export function excerpt(text: string, term: string): string {
   const line = oneLine(text);
   if (weight(line) <= EXCERPT_MAX_WEIGHT) return line;
-  const at = line.toLowerCase().indexOf(term.toLowerCase());
+  const at = findIn(line, term);
   if (at <= 0) return cutToWeight(line, EXCERPT_MAX_WEIGHT - weight(ELLIPSIS)) + ELLIPSIS;
   const before = lastToWeight(line.slice(0, at), EXCERPT_BEFORE_WEIGHT);
   const head = before.length < at ? ELLIPSIS + before : before;
@@ -130,10 +136,12 @@ const timedOut = (err: unknown): boolean => (err as { code?: unknown } | null)?.
  * Runs one search for `scope`'s reply: refuses words too short or too heavy and dates not written as days without
  * touching the database; then, holding one of the Agent's search slots (as a person's search holds theirs: two at once,
  * four in the whole service; none free: `SEARCH_BUSY`), one read-only transaction under the search timeout
- * (`inSearchBudget`; past it: `SEARCH_TIMEOUT`). The output is `{results, more}` — the newest `SEARCH_RESULTS_MAX` at
- * most, as many as fit `TOOLS.resultMaxWeight` — or, with nothing found, `{results: [], note}`; in a group nothing found
- * also tells the elsewhere hook (`ToolDeps.elsewhere`, Task 8), which tells the model nothing. A result's numbers are
- * minted for what is handed over only; what it found (`found`) and the words (`query`) go with the outcome.
+ * (`inSearchBudget`; past it: `SEARCH_TIMEOUT`). The output is `{about, more, results}` — `TOOL_MATERIAL`, then the
+ * paging flag before the results (so a cut of the result, runtime/loop.ts, keeps it), the newest `SEARCH_RESULTS_MAX`
+ * at most, as many as fit `TOOLS.resultMaxWeight` — or, with nothing found, `{results: [], note}`. In a group nothing
+ * found also starts the elsewhere hook (`ToolDeps.elsewhere`, Task 8) on its own, never awaited (`lookElsewhere`): what
+ * it does or how long it takes changes nothing the model is told, nor when. A result's numbers are minted for what is
+ * handed over only; what it found (`found`) and the words (`query`) go with the outcome.
  */
 export async function searchMessages(deps: ToolDeps, scope: RunScope, input: SearchInput, signal: AbortSignal): Promise<ToolOutcome> {
   const term = cleanText(input.query);
@@ -158,12 +166,25 @@ export async function searchMessages(deps: ToolDeps, scope: RunScope, input: Sea
   }
 
   if (found.rows.length === 0) {
-    if (scope.group) await deps.elsewhere?.(scope, term);
+    if (scope.group) lookElsewhere(deps, scope, term);
     const note = scope.group ? NOT_FOUND_IN_GROUP + (found.ownerAsked ? ASK_ME_AT_HOME : "") : NOT_FOUND;
     return { output: { results: [], note }, query: term };
   }
   const { results, refs, more } = fit(found, deps, scope, term);
-  return { output: { results, more }, found: refs, query: term };
+  return { output: { about: TOOL_MATERIAL, more, results }, found: refs, query: term };
+}
+
+/**
+ * The elsewhere hook (`ToolDeps.elsewhere`), started after the search has answered and never awaited: it cannot change
+ * or delay what the model is told. Whatever it throws, or the promise it returns rejects with, is logged by its kind only
+ * (never the words or anything found).
+ */
+function lookElsewhere(deps: ToolDeps, scope: RunScope, term: string): void {
+  const hook = deps.elsewhere;
+  if (hook === undefined) return;
+  void Promise.resolve()
+    .then(() => hook(scope, term))
+    .catch((err: unknown) => deps.log.warn({ runId: scope.id, kind: (err as { name?: unknown } | null)?.name ?? typeof err }, "agent tool: the elsewhere hook failed"));
 }
 
 /** The search's one transaction: where it may look, then the rows; in a group with nothing found, who asked. */
@@ -198,10 +219,11 @@ const WIDEST_FILE = "f999999";
  * role`, as a group's labels name people: by account, never by what anyone wrote; `你自己` for the Agent), when (the
  * site's time, `YYYY-MM-DD HH:mm 周X`), what (`excerpt`), where (in the Agent's own conversation, a group's title for
  * what was said there), and a file's number and name — not for a call at or before a group reply's line, which is shown
- * as its text only. In a group the run's mark is taken out of whatever someone else wrote.
+ * as its text only. In a group the run's mark is taken out of whatever someone else wrote; and no citation (`〔m3〕`,
+ * tools/refs.ts `withoutCitations`) is shown in any of it: this run's numbers are the only ones it sees (`ref`).
  */
 function fit(found: Found, deps: ToolDeps, scope: RunScope, term: string): { results: Result[]; refs: MessageRef[]; more: boolean } {
-  const clean = (s: string): string => withoutMark(s, scope.group ? scope.mark : null);
+  const clean = (s: string): string => withoutCitations(withoutMark(s, scope.group ? scope.mark : null));
   const drafts = found.rows.slice(0, SEARCH_RESULTS_MAX).map((row) => {
     const seq = Number(row.seq);
     const role = row.sender_id === scope.agentId ? null : row.sender_kind === "agent" ? "Agent" : row.sender_id === scope.ownerId ? "你的主人" : "群成员";
@@ -210,10 +232,10 @@ function fit(found: Found, deps: ToolDeps, scope: RunScope, term: string): { res
     const file = row.attachment && !(scope.group && seq <= found.line) ? { id: row.attachment.id, name: clean(row.attachment.name) } : null;
     const result: Result = {
       ref: WIDEST_MESSAGE,
-      ...(elsewhere ? { where: oneLine(cleanText(row.title ?? "")) || NO_GROUP_TITLE } : {}),
-      who: role === null ? BY_YOU : `${labelName(row.sender_name, row.sender_handle)}｜${role}`,
+      ...(elsewhere ? { where: oneLine(clean(cleanText(row.title ?? ""))) || NO_GROUP_TITLE } : {}),
+      who: role === null ? BY_YOU : `${clean(labelName(row.sender_name, row.sender_handle))}｜${role}`,
       when: `${date} ${time} ${siteWeekday(row.created_at, deps.config.siteTimezone)}`,
-      text: clean(excerpt(row.text ?? "", term)),
+      text: excerpt(clean(row.text ?? ""), term),
       ...(file ? { file: { ref: WIDEST_FILE, name: file.name } } : {}),
     };
     return { result, at: { conversationId: row.conversation_id, seq }, attachmentId: file?.id ?? null };
@@ -221,7 +243,7 @@ function fit(found: Found, deps: ToolDeps, scope: RunScope, term: string): { res
   let kept = drafts.length;
   let more = found.rows.length > SEARCH_RESULTS_MAX;
   const max = deps.config.tools.resultMaxWeight;
-  const weighs = (n: number, m: boolean) => weight(JSON.stringify({ results: drafts.slice(0, n).map((d) => d.result), more: m }));
+  const weighs = (n: number, m: boolean) => weight(JSON.stringify({ about: TOOL_MATERIAL, more: m, results: drafts.slice(0, n).map((d) => d.result) }));
   while (kept > 1 && weighs(kept, true) > max) {
     kept--;
     more = true;
@@ -230,7 +252,7 @@ function fit(found: Found, deps: ToolDeps, scope: RunScope, term: string): { res
   // One result too heavy alone (a very small `resultMaxWeight`): its text cut to what is left.
   if (kept === 1 && weighs(1, more) > max) {
     const first = shown[0]!.result;
-    const without = weight(JSON.stringify({ results: [{ ...first, text: "" }], more }));
+    const without = weight(JSON.stringify({ about: TOOL_MATERIAL, more, results: [{ ...first, text: "" }] }));
     first.text = cutToWeight(first.text, Math.max(0, max - without - 2));
   }
   const results = shown.map(({ result, at, attachmentId }) => ({
