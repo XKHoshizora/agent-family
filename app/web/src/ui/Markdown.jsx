@@ -5,7 +5,8 @@
 //   - every link opens a new tab, with rel="noopener noreferrer nofollow", its real address as its tooltip, and its real
 //     host after its text (always: also when the text is that address), both isolated from the text around them;
 //   - a code block has 复制, a table scrolls sideways inside the bubble.
-import React, { createElement, memo, useEffect, useRef, useState } from "react";
+import React, { createElement, memo, useContext, useEffect, useRef, useState } from "react";
+import { CitesContext, withCites } from "./cites.jsx";
 import { linkTextShown, safeHref, withoutBidiControls } from "./markdownRules.js";
 import { mentionParts, withoutMarks } from "./mentionMarks.js";
 import { MentionTag } from "./MentionText.jsx";
@@ -74,20 +75,26 @@ const isKatexRoot = (node) => node.tag === "span" && (node.props?.className ?? [
 
 /**
  * A text of the tree: its mentions (between the marks the text was sent with, mentionMarks.js) as tags meaning the id of
- * their index in `ids`; inside code or maths (`plain`) the marks are only taken out — a mention there is plain text.
+ * their index in `ids`, and what the message cites (`cites`: cites.jsx) in the text between them as links; inside code or
+ * maths (`plain`) the marks are only taken out — a mention there is plain text, and a citation there stays as written.
  */
-const texts = (text, plain, ids) =>
+const texts = (text, plain, ids, cites, key) =>
   plain
     ? [withoutMarks(text)]
-    : mentionParts(text).map((part) => (typeof part === "string" ? part : createElement(MentionTag, { text: part.text, id: ids[part.index] ?? null })));
+    : mentionParts(text).map((part, j) => (typeof part === "string" ? withCites(part, cites, `${key}-${j}`) : createElement(MentionTag, { text: part.text, id: ids[part.index] ?? null })));
 
-/** One checked element as React's: the app's parts for links, code blocks and tables; classes joined; a cell's alignment. */
-function toElement(node, katex, ids, code = false) {
+/**
+ * One checked element as React's: the app's parts for links, code blocks and tables; classes joined; a cell's alignment;
+ * in its text (not in code or a formula) its mentions as tags and what the message cites as links.
+ */
+function toElement(node, katex, ids, code = false, cites = null) {
   const inKatex = katex || isKatexRoot(node);
   const inCode = code || node.tag === "code" || node.tag === "pre";
   const { className, align, ...rest } = node.props ?? {};
   if (!inKatex && node.tag === "a") return createElement(Link, { href: rest.href, text: linkText(node) });
-  const children = (node.children ?? []).flatMap((child) => (typeof child === "string" ? texts(child, inKatex || inCode, ids) : [toElement(child, inKatex, ids, inCode)]));
+  const children = (node.children ?? []).flatMap((child, i) =>
+    typeof child === "string" ? texts(child, inKatex || inCode, ids, cites, `c${i}`) : [toElement(child, inKatex, ids, inCode, cites)],
+  );
   if (!inKatex && node.tag === "pre") return createElement(CodeBlock, null, ...children);
   if (!inKatex && node.tag === "table") return createElement(Table, null, ...children);
   const props = { ...rest };
@@ -98,9 +105,14 @@ function toElement(node, katex, ids, code = false) {
 }
 
 /**
- * A checked tree (markdownTree.js `validateTree`), shown; made again only when the tree changes. `mentionIds`: who each
- * marked mention means, by its index.
+ * A checked tree (markdownTree.js `validateTree`), shown; made again only when the tree, or what its message cites,
+ * changes. `mentionIds`: who each marked mention means, by its index.
  */
 export const RichTree = memo(function RichTree({ tree, mentionIds = [] }) {
-  return createElement("div", { className: "md" }, ...tree.flatMap((node) => (typeof node === "string" ? texts(node, false, mentionIds) : [toElement(node, false, mentionIds)])));
+  const cites = useContext(CitesContext);
+  return createElement(
+    "div",
+    { className: "md" },
+    ...tree.flatMap((node, i) => (typeof node === "string" ? texts(node, false, mentionIds, cites, `c${i}`) : [toElement(node, false, mentionIds, false, cites)])),
+  );
 });

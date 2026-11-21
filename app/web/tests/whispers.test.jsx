@@ -146,6 +146,55 @@ describe("a whisper in the conversation", () => {
     expect(whisperLi("w1").textContent).toBe("已过期");
   });
 
+  it("an open found_elsewhere whisper shows what was found before its buttons — where · who · when, then the text, a long one folded with 展开", async () => {
+    const long = "很长的一段话".repeat(40);
+    const hits = [
+      { where: "我们的专属会话", who: "小美", when: "2026-11-20 14:05", text: "蓝鲸计划的口令是七七" },
+      { where: "乙群", who: "小安", when: "2026-11-19 09:30", text: long },
+    ];
+    await openGroup({ whispers: [whisper("w1", G1, 2, { detail: { hits } }), whisper("w2", G1, 3, { status: "accepted", detail: { hits } })] });
+    const items = [...whisperLi("w1").querySelectorAll(".whisper-hit")];
+    expect(items.map((li) => li.querySelector(".whisper-hit-meta").textContent)).toEqual(["我们的专属会话 · 小美 · 2026-11-20 14:05", "乙群 · 小安 · 2026-11-19 09:30"]);
+    expect(items.map((li) => li.querySelector(".whisper-hit-text").textContent)).toEqual(["蓝鲸计划的口令是七七", long]);
+    // Before the buttons.
+    const tell = inWhisper("w1").getByRole("button", { name: "告诉他们" });
+    expect(items[1].compareDocumentPosition(tell) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The long one is folded, and opens.
+    expect(items[1].querySelector(".whisper-hit-text").classList.contains("folded")).toBe(true);
+    expect(items[0].querySelector("button")).toBeNull();
+    await click(within(items[1]).getByRole("button", { name: "展开" }));
+    expect(items[1].querySelector(".whisper-hit-text").classList.contains("folded")).toBe(false);
+    expect(within(items[1]).getByRole("button", { name: "收起" })).toBeTruthy();
+    // Answered: the quiet line only.
+    expect(whisperLi("w2").textContent).toBe("已告诉他们");
+  });
+
+  it("a refusal that is not stale keeps the buttons and says why: busy_run, paused, no model, too fast", async () => {
+    const cases = [
+      [409, "busy_run", "它正在回复，说完再点。"],
+      [409, "agent_paused", "这个 Agent 已暂停，恢复后才能重试。"],
+      [400, "invalid_request", "这个 Agent 还没有选择模型。"],
+      [429, "rate_limited", "回复太频繁了，请稍等一分钟再试。"],
+    ];
+    for (const [status, code, text] of cases) {
+      const { api } = await openGroup({
+        whispers: [whisper("w1", G1, 2)],
+        api: {
+          acceptWhisper: vi.fn(async () => {
+            throw apiError(status, code);
+          }),
+        },
+      });
+      const asked = api.listWhispers.mock.calls.length;
+      await click(inWhisper("w1").getByRole("button", { name: "告诉他们" }));
+      expect([code, inWhisper("w1").getByRole("alert").textContent]).toEqual([code, text]);
+      expect([code, inWhisper("w1").getByRole("button", { name: "告诉他们" }).disabled]).toEqual([code, false]);
+      // Still open: nothing is fetched again (only a stale answer is).
+      expect([code, api.listWhispers.mock.calls.length]).toEqual([code, asked]);
+      cleanup();
+    }
+  });
+
   it("a push makes one, answers one, or expires one; a whisper of a conversation not held is ignored", async () => {
     const { transport } = await openGroup();
     await push(transport, { type: "whisper", whisper: whisper("w1", G1, 3) });
@@ -240,6 +289,28 @@ describe("with older history", () => {
     await flush();
     expect(api.listWhispers).toHaveBeenCalledTimes(2);
     expect(rows().slice(0, 2)).toEqual(["m1", "m2"]);
+  });
+
+  it("refused once, and signed out (the layer stopped) meanwhile: it is not asked again", async () => {
+    const app = await openGroup({
+      messages: range(G1, 11, 40, [ANN, BO]),
+      whispers: [],
+      api: {
+        listMessages: vi.fn(async () => ({ messages: range(G1, 1, 10, [ANN, BO]), nextBefore: null })),
+        listWhispers: vi.fn(async () => {
+          throw apiError(429, "rate_limited");
+        }),
+      },
+    });
+    fireEvent.scroll(timeline());
+    await flush();
+    expect(app.api.listWhispers).toHaveBeenCalledTimes(1);
+    app.layer.stop();
+    await elapse(WHISPER_RETRY_MS);
+    await flush();
+    await elapse(10 * WHISPER_RETRY_MS);
+    await flush();
+    expect(app.api.listWhispers).toHaveBeenCalledTimes(1);
   });
 
   it("a conversation where I have no Agent and no whisper asks the list route for nothing", async () => {

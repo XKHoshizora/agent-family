@@ -88,6 +88,100 @@ export async function searchConversation(
   };
 }
 
+// --- an Agent's search (agents/tools/search.ts) ------------------------------------------------------
+
+/** What `searchRows` looks through: the conversations, the words and the filters, and in a group reply its window. */
+export interface SearchRowsOptions {
+  /** The conversations searched, and no other: the reader must also see each message (VISIBLE_JOIN). */
+  conversationIds: readonly string[];
+  /** The words, matched as the routes match them (`matchOn`: a substring of the text or the file's name, any case). */
+  term: string;
+  /** Only a sender whose account name (any case) or display name is exactly this; null: anyone. */
+  from: string | null;
+  /** Only messages sent before the start of this day (`YYYY-MM-DD`), or after its end, in `timeZone`; null: no bound. */
+  before: string | null;
+  after: string | null;
+  timeZone: string;
+  /**
+   * In `conversationId` only what a group reply may be shown (agents/context.ts `askerLine`): messages after `after` and
+   * at most `upTo` (what the reply had heard when it began), and the calls it answers (`calls`, whatever their seq) — one
+   * at or before `after` by its text only, never by its file's name (the reply is shown such a call as its text only).
+   * Null: the whole of every conversation searched.
+   */
+  window: { conversationId: string; after: number; upTo: number; calls: readonly number[] } | null;
+  /**
+   * Besides the reader, only what this principal can read now too (a current member, the message after their joining:
+   * the visibility rule with them as reader) — the owner shown what an Agent found elsewhere (agents/tools/elsewhere.ts).
+   * Absent or null: the reader alone decides.
+   */
+  alsoVisibleTo?: string | null;
+  limit: number;
+}
+
+/** A message `searchRows` found: what a result is made of. Its text and its file's name only — never anything else of its body. */
+export interface SearchRow {
+  conversation_id: string;
+  seq: string;
+  created_at: Date;
+  sender_id: string;
+  text: string | null;
+  /** A file message's attachment. */
+  attachment: { id: string; name: string } | null;
+  sender_name: string;
+  sender_handle: string;
+  sender_kind: "human" | "agent";
+  /** The conversation's title (a group's; null when it has none). */
+  title: string | null;
+  conversation_type: string;
+}
+
+/**
+ * The messages that match among `conversationIds` (and only those: the list is a parameter of the one statement) as
+ * `readerId` sees them now (VISIBLE_JOIN: current members only, nothing from before they joined), text and file messages
+ * but the fixed greeting, by the filters and the window, the newest first (by when they were sent), at most `limit`.
+ * Rows, not wire messages: what an Agent's search tool turns into its results. Run it inside `inSearchBudget`.
+ */
+export async function searchRows(q: Queryable, readerId: string, o: SearchRowsOptions): Promise<SearchRow[]> {
+  const { rows } = await q.query<SearchRow>(
+    `select m.conversation_id, m.seq::text as seq, m.created_at, m.sender_id, m.body ->> 'text' as text,
+            case when m.kind = 'file' then m.body -> 'attachment' end as attachment,
+            sp.display_name as sender_name, sp.handle::text as sender_handle, sp.kind as sender_kind,
+            c.title, c.type as conversation_type
+       from messages m ${VISIBLE_JOIN}
+       join principals sp on sp.id = m.sender_id
+       join conversations c on c.id = m.conversation_id
+      where m.conversation_id = any($2::uuid[])
+        and ${matchOn(3)}
+        and (m.body -> 'fixed') is distinct from 'true'::jsonb
+        and ($4::text is null or lower(sp.handle::text) = lower($4::text) or sp.display_name = $4::text)
+        and ($5::date is null or m.created_at < ($5::date)::timestamp at time zone $7::text)
+        and ($6::date is null or m.created_at >= ($6::date + 1)::timestamp at time zone $7::text)
+        and ($8::uuid is null or m.conversation_id <> $8::uuid or (m.seq > $9::bigint and m.seq <= $10::bigint)
+             or (m.seq = any($11::bigint[]) and (m.seq > $9::bigint or (m.body ->> 'text') ilike $3 escape '\\')))
+        and ($13::uuid is null or exists (select 1 from memberships ov
+                                           where ov.conversation_id = m.conversation_id and ov.principal_id = $13::uuid
+                                             and ov.left_seq is null and ov.joined_seq < m.seq))
+      order by m.created_at desc, m.conversation_id desc, m.seq desc
+      limit $12`,
+    [
+      readerId,
+      o.conversationIds,
+      containsPattern(o.term),
+      o.from,
+      o.before,
+      o.after,
+      o.timeZone,
+      o.window?.conversationId ?? null,
+      o.window?.after ?? 0,
+      o.window?.upTo ?? 0,
+      o.window?.calls ?? [],
+      o.limit,
+      o.alsoVisibleTo ?? null,
+    ],
+  );
+  return rows;
+}
+
 // --- global search -----------------------------------------------------------------------------
 
 /** created_at at microsecond precision (a JS Date would lose it, and the cursor must resume exactly). */

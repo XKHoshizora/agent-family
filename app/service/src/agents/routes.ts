@@ -133,6 +133,7 @@ const agentSettings = {
   memory: z.boolean().optional(),
   memoryAsk: z.boolean().optional(),
   sharedNotes: z.boolean().optional(),
+  whisperElsewhere: z.boolean().optional(),
   ownerAppellation: ownerAppellation.optional(),
   reasoning: reasoning.optional(),
   model: model.optional(),
@@ -157,6 +158,7 @@ const agentView = z.object({
   memory: z.boolean(),
   memoryAsk: z.boolean(),
   sharedNotes: z.boolean(),
+  whisperElsewhere: z.boolean(),
   ownerAppellation: z.string().nullable(),
   appellations: z.array(
     z.object({
@@ -204,6 +206,7 @@ const toView = (a: AgentRow, spent: { others: bigint; proactive: bigint }, appel
   memory: a.memory,
   memoryAsk: a.memoryAsk,
   sharedNotes: a.sharedNotes,
+  whisperElsewhere: a.whisperElsewhere,
   ownerAppellation: a.ownerAppellation,
   appellations,
   othersSpentToday: formatPoints(spent.others),
@@ -285,6 +288,7 @@ export function registerAgentRoutes(
         memory: b.memory ?? true,
         memoryAsk: b.memoryAsk ?? false,
         sharedNotes: b.sharedNotes ?? true,
+        whisperElsewhere: b.whisperElsewhere ?? true,
         ownerAppellation: b.ownerAppellation ?? null,
         reasoning: b.reasoning ?? "none",
         model: b.model ?? null,

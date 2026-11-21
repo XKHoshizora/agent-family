@@ -11,6 +11,7 @@ import type { ModelCall } from "../models/gateway.ts";
 import type { Resolved } from "../models/resolve.ts";
 import { handleOf } from "../principals/store.ts";
 import { renderProposalBlock } from "./persona.ts";
+import { withoutCitations } from "./tools/refs.ts";
 import {
   GROUP_AGENTS_NAMED,
   GROUP_PEOPLE_NAMED,
@@ -104,12 +105,19 @@ export interface ContextRun {
    * `begin`). None when absent.
    */
   reserved?: number;
+  /**
+   * A reply offered tools: the number of each attachment it is shown (agents/tools/refs.ts `RunRefs.file`), which its
+   * label carries — the message's own and a quoted one's alike. Absent: labels carry none.
+   */
+  fileRef?: (attachmentId: string) => string;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
 export interface LoadedContext {
   /** The run's system text, with its notes passage known apart (what the budget and the estimate measure). */
   system: SystemText;
+  /** Who spoke in what was read and is in the group now (`speakersOf`), as `system`'s roster lists them; none in the Agent's own conversation. */
+  speakers: Speaker[];
   /**
    * In a group, the run's mark (`newMark`), which `system` and the labels of `entries` carry and nothing else they show
    * does; null in the Agent's own conversation.
@@ -334,7 +342,13 @@ interface MessageRow {
   proposal_field: string | null;
 }
 
-const toAttachment = (a: AttachmentRef): ContextAttachment => ({ id: a.id, name: a.name, image: a.inline === true });
+/** An attachment as the context shows it; with `fileRef` (a reply offered tools), with its number. */
+const toAttachment = (a: AttachmentRef, fileRef?: (attachmentId: string) => string): ContextAttachment => ({
+  id: a.id,
+  name: withoutCitations(a.name),
+  image: a.inline === true,
+  ...(fileRef ? { ref: fileRef(a.id) } : {}),
+});
 
 
 /**
@@ -359,7 +373,8 @@ const inGroupNow = (ms: string): string =>
  * read for a block again. (A reply in a group never proposes: nothing is looked up there.) In a group a quote of a
  * message at or before the asker's line (`ContextRun.group.after`) is left out as one the Agent cannot see is: the
  * quoting message's own text only; and the calls the run answers (`ContextRun.group.calls`) belong whatever `from` is,
- * one at or before `from` as its text only (no attachment: it is not read).
+ * one at or before `from` as its text only (no attachment: it is not read). No citation (`〔m3〕`) is shown, in a text, a
+ * quote or a file's name (tools/refs.ts `withoutCitations`): a number means something only in the run that gave it.
  * `more`: as many as `limit` (there may be older ones).
  */
 async function loadPage(
@@ -399,7 +414,7 @@ async function loadPage(
       [run.agentId, run.conversationId, quotedSeqs, run.group?.after ?? 0],
     );
     for (const r of quoted.rows) {
-      const shown = r.text ? r.text : r.attachment ? attachmentLabel(toAttachment(r.attachment)) : "";
+      const shown = r.text ? withoutCitations(r.text) : r.attachment ? attachmentLabel(toAttachment(r.attachment, run.fileRef)) : "";
       if (shown !== "") quotes.set(Number(r.seq), shown);
     }
   }
@@ -408,12 +423,12 @@ async function loadPage(
     if (role === null) return [];
     const quoted = typeof r.reply_to === "number" ? (quotes.get(r.reply_to) ?? null) : null;
     const seq = Number(r.seq);
-    let text = entryText(r.text ?? "", quoted);
+    let text = entryText(withoutCitations(r.text ?? ""), quoted);
     if (role === "assistant" && r.proposal_persona !== null) {
       const block = renderProposalBlock({ persona: r.proposal_persona, intro: r.proposal_intro, field: r.proposal_field });
       text = text === "" ? block : `${text}\n\n${block}`;
     }
-    const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment) : null };
+    const entry: ContextEntry = { role, text, attachment: r.attachment ? toAttachment(r.attachment, run.fileRef) : null };
     const speaker =
       group && role === "user"
         ? {
@@ -519,7 +534,7 @@ export async function loadContext(
   const owned = stored !== null && base !== null && stored.fromSeq > base ? stored : null;
   const summary = owned !== null && owned.fromSeq > line && owned.uptoSeq < run.coversSeq ? owned : null;
   const carrying = (text: string | null) => (mark: string, speakers: readonly Speaker[]): SystemText => withSummary(system(mark, speakers), text);
-  const withPassage = carrying(summary?.text ?? null);
+  const withPassage = carrying(summary === null ? null : withoutCitations(summary.text));
   const reading = budgetWith(withPassage("", []));
   // In a group, nothing at or before the asker's line either (`askerLine`): what is read starts after the later of the two;
   // with a summary shown, after what it covers.
@@ -580,7 +595,7 @@ export async function loadContext(
     const found = await findDownloadable(q, run.agentId, a.id);
     if (found) attachments.set(a.id, found);
   }
-  return { system: text, mark, budget, planRatio: ratio, entries, attachments, topicStart: start, leftOut, summary: carried };
+  return { system: text, speakers, mark, budget, planRatio: ratio, entries, attachments, topicStart: start, leftOut, summary: carried };
 }
 
 /**
@@ -713,7 +728,7 @@ export async function buildContext(
   loaded: LoadedContext,
   resolved: Pick<Resolved, "vision" | "pdf">,
   log: Pick<FastifyBaseLogger, "error">,
-  { signal, stop = () => false }: { signal?: AbortSignal; stop?: () => boolean } = {},
+  { signal, stop = () => false, closing }: { signal?: AbortSignal; stop?: () => boolean; closing?: string } = {},
 ): Promise<BuiltContext> {
   const plan = new ContextPlan(loaded.entries, loaded.budget, loaded.planRatio);
   /** Whether a read of this build has succeeded (the store answered), and how many have failed. */
@@ -758,13 +773,14 @@ export async function buildContext(
       const max = Math.min(found.size, maxChars * UTF8_MAX_BYTES_PER_CHAR, plan.bytesLeft);
       const got = await read(attachment, found.blobKey, max, startsLikeText);
       const text = got ? fileText(got.data, got.complete, maxChars) : null;
-      if (text) plan.offer(slot, { type: "text", text: withoutMark(text.text, loaded.mark), chars: text.chars });
+      if (text) plan.offer(slot, { type: "text", text: withoutCitations(withoutMark(text.text, loaded.mark)), chars: text.chars });
     }
   }
 
   for (const [slot, attachment] of plan.attachments(false)) await show(slot, attachment);
   plan.keepOlder();
   for (const [slot, attachment] of plan.attachments(true)) await show(slot, attachment);
-  const { messages, tokens, fixed } = plan.build();
+  // A call that would end with the Agent's own turn ends with `closing` (default `CONTINUE_TURN`, `ContextPlan.build`).
+  const { messages, tokens, fixed } = plan.build(closing);
   return { messages, inputTokensEstimate: systemTokens(loaded.system) + tokens, fixedTokens: fixed };
 }

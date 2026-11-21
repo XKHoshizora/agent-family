@@ -392,7 +392,7 @@ describe("the proactive replies' configuration", () => {
 });
 
 describe("the tools configuration", () => {
-  const defaults = { enabled: true, maxRounds: 8, maxPoints: 20, searchPerReply: 6, filePerReply: 4, resultMaxWeight: 3000, runTimeoutMs: 300_000 };
+  const defaults = { enabled: true, maxRounds: 8, maxPoints: 20, searchPerReply: 6, filePerReply: 4, timePerReply: 1, resultMaxWeight: 3000, runTimeoutMs: 300_000 };
 
   test("unset or empty: every default", () => {
     expect(loadConfig(base).tools).toEqual(defaults);
@@ -404,6 +404,8 @@ describe("the tools configuration", () => {
     expect(loadConfig({ ...base, TOOLS: '{"maxRounds":3,"resultMaxWeight":500}' }).tools).toEqual({ ...defaults, maxRounds: 3, resultMaxWeight: 500 });
     expect(loadConfig({ ...base, TOOLS: '{"enabled":false}' }).tools).toEqual({ ...defaults, enabled: false });
     expect(loadConfig({ ...base, TOOLS: '{"runTimeoutMs":1000}' }).tools.runTimeoutMs).toBe(1000);
+    // Each tool has its own count: the clock's as the others'.
+    expect(loadConfig({ ...base, TOOLS: '{"timePerReply":3}' }).tools).toEqual({ ...defaults, timePerReply: 3 });
   });
 
   test("a count that is not a whole number of at least 1, a time out of range, an unknown key and bad JSON refuse", () => {
@@ -414,6 +416,8 @@ describe("the tools configuration", () => {
       '{"maxPoints":0}',
       '{"searchPerReply":0}',
       '{"filePerReply":-1}',
+      '{"timePerReply":0}',
+      '{"timePerReply":1001}',
       '{"resultMaxWeight":0}',
       '{"runTimeoutMs":999}',
       '{"runTimeoutMs":3600001}',

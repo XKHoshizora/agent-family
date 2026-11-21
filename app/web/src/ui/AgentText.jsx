@@ -10,6 +10,7 @@
 // the text before it is shown either way.
 import React, { Suspense, memo, use, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { ChunkBoundary } from "./ChunkBoundary.jsx";
+import { CitedText } from "./cites.jsx";
 import { mentionsIn, outsideAddresses } from "../data/mentions.js";
 import { markMentions, withoutMarks, withoutMarksKeeping } from "./mentionMarks.js";
 import { MentionText } from "./MentionText.jsx";
@@ -79,7 +80,7 @@ function useShownKind(view, kind) {
   }, [view, kind]);
 }
 
-/** A plain result as shown: the text (`plain`, its mentions as tags), with the note when it was too complex or too slow. */
+/** A plain result as shown: the text (`plain`, its mentions as tags and what it cites as links), with the note when it was too complex or too slow. */
 const plainOf = (plain, result) => (withNote(result) ? <PlainWithNote text={plain} /> : plain);
 
 /**
@@ -152,7 +153,8 @@ export const AgentText = memo(function AgentText({ text, id = null, mentions = n
   const tags = useMemo(() => (shown === unmarked.text ? outsideAddresses(shown, mentionsIn(shown, unmarked.mentions)) : []), [shown, unmarked]);
   const asked = useMemo(() => markMentions(shown, tags), [shown, tags]);
   const mentionIds = useMemo(() => tags.map((t) => t.id), [tags]);
-  const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : shown;
+  // Plain: its mentions as tags, and what it cites (cites.jsx) as links; rich, the tree does the same.
+  const plain = tags.length > 0 ? <MentionText text={shown} mentions={tags} /> : <CitedText text={shown} />;
   const client = markdownClient();
   const view = useMarkdownView();
   const host = useRef(null);

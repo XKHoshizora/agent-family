@@ -4,9 +4,10 @@ import type { Config } from "../config.ts";
 import type { Change } from "../conversations/events.ts";
 import { currentMembership } from "../conversations/store.ts";
 import { appendSystem } from "../conversations/system.ts";
-import type { Tx } from "../db.ts";
+import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
-import { foundOf, lookupsOf, queriesOf, type LookupFields } from "../messages/lookups.ts";
+import { citesOf, foundOf, lookupsOf, queriesOf, type LookupFields, type MessageRef } from "../messages/lookups.ts";
+import { acknowledgementTxn, postingRun } from "../messages/read.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
@@ -52,6 +53,7 @@ export interface NewAgent {
   memory: boolean;
   memoryAsk: boolean;
   sharedNotes: boolean;
+  whisperElsewhere: boolean;
   ownerAppellation: string | null;
   reasoning: ReasoningLevel;
   model: AgentModel;
@@ -93,8 +95,8 @@ export async function createAgent(
   const created = await t.query<{ created_at: Date }>(
     `insert into agents (principal_id, intro, field, persona, persona_version, reply_mode, group_mentions, reasoning,
                          model_source, site_model_id, provider_id, provider_model, chain_budget_micro, others_budget_micro, owner_appellation,
-                         proactive, proactive_level, proactive_budget_micro, memory, memory_ask, shared_notes)
-     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21) returning created_at`,
+                         proactive, proactive_level, proactive_budget_micro, memory, memory_ask, shared_notes, whisper_elsewhere)
+     values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22) returning created_at`,
     [
       id,
       input.intro,
@@ -114,6 +116,7 @@ export async function createAgent(
       input.memory,
       input.memoryAsk,
       input.sharedNotes,
+      input.whisperElsewhere,
     ],
   );
   const conversation = await t.query<{ id: string }>("insert into conversations (type, creator_id) values ('agent', $1) returning id", [ownerId]);
@@ -151,6 +154,7 @@ export async function createAgent(
     memory: input.memory,
     memoryAsk: input.memoryAsk,
     sharedNotes: input.sharedNotes,
+    whisperElsewhere: input.whisperElsewhere,
     ownerAppellation: input.ownerAppellation,
     reasoning: input.reasoning,
     model: input.model,
@@ -168,6 +172,8 @@ export interface AgentReply extends LookupFields {
   reasoning: string;
   stopped: boolean;
   truncated: boolean;
+  /** The messages its text cites by number (agents/tools/refs.ts `citesIn`): only a reply offered tools has any. */
+  cites?: Record<string, MessageRef>;
 }
 
 /**
@@ -216,6 +222,15 @@ export interface AgentReply extends LookupFields {
  *
  * Null, storing nothing, when there is nothing to show: no visible text and, in its own conversation, no reasoning kept;
  * in a group no visible text (its members would be shown an empty message), whatever reasoning there is.
+ *
+ * `as` "ack": what the reply said before it called a tool, posted at once as its acknowledgement ("先应一声、再交付"),
+ * under the same locks and checks and cleaned the same way, but never read for a proposal (whatever follows its first
+ * `<af-` is dropped, as in a group), with `client_txn` `ack:<run id>` (messages/read.ts `acknowledgementTxn`: one per run,
+ * posting it again returns it), a body `{text, reasoning?, ack: true}` and nothing of what tools looked up; it calls
+ * nobody (its mentions are not read). The reply posted after it (`as` "reply", the default) quotes the question it
+ * answers (`replyToSeq`: the seq the run covers) when anyone but the Agent wrote a text or file message in the
+ * conversation after the acknowledgement that stands for it (`standingAcknowledgement`: its own, or the one an earlier
+ * attempt at the same question left, a retry's); otherwise it is posted as ever.
  */
 export async function postAsAgent(
   t: Tx,
@@ -225,12 +240,15 @@ export async function postAsAgent(
   reply: AgentReply,
   mark: string | null,
   config: RunLimits & Pick<Config, "agentChainLimit">,
+  as: "reply" | "ack" = "reply",
 ): Promise<{ message: StoredMessage; duplicate: boolean; triggered: Triggered } | null> {
   const agent = await lockAgent(t, agentId, conversationId);
   const own = conversationId === agent.conversationId;
+  const ack = as === "ack";
+  const txn = ack ? acknowledgementTxn(runId) : runId;
   const prior = await t.query<MessageRow>(
     `select ${MESSAGE_COLUMNS} from messages m where m.conversation_id = $1 and m.sender_id = $2 and m.client_txn = $3`,
-    [conversationId, agentId, runId],
+    [conversationId, agentId, txn],
   );
   if (prior.rows[0]) return { message: toStored(prior.rows[0]), duplicate: true, triggered: noneTriggered() };
   // A run that has ended — another instance's recovery ended it while this one was still answering — is never posted;
@@ -249,9 +267,9 @@ export async function postAsAgent(
   if (!own && mark === null) throw new Error("a reply in a group is posted only with the mark its run drew");
 
   let text = cleanModelText(reply.text);
-  // In a group nothing is a proposal, and no block of one is shown.
-  const proposal = own ? parseProposalBlock(text) : null;
-  if (!own) text = withoutUnfinishedBlock(text);
+  // In a group nothing is a proposal, and no block of one is shown; nor in an acknowledgement.
+  const proposal = own && !ack ? parseProposalBlock(text) : null;
+  if (!own || ack) text = withoutUnfinishedBlock(text);
   const proposalId = proposal ? randomUUID() : null;
   if (proposal) text = hasVisibleText(proposal.visible) ? proposal.visible : PROPOSAL_PLACEHOLDER;
   let truncated = reply.truncated;
@@ -280,12 +298,35 @@ export async function postAsAgent(
   if (reply.stopped) body.stopped = true;
   if (truncated) body.truncated = true;
   if (proposalId !== null) body.proposalId = proposalId;
+  if (ack) {
+    body.ack = true;
+    return { message: await insertMessage(t, conversationId, agentId, "text", body, txn), duplicate: false, triggered: noneTriggered() };
+  }
+  // Someone else wrote after the acknowledgement that stands for it (its own, or an earlier attempt's: a retry's): the
+  // answer says which question it answers.
+  const standing = await standingAcknowledgement(t, conversationId, agentId, runId);
+  const overtaken =
+    standing !== null &&
+    (
+      await t.query("select 1 from messages m where m.conversation_id = $1 and m.seq > $2 and m.sender_id <> $3 and m.kind in ('text', 'file') limit 1", [
+        conversationId,
+        standing,
+        agentId,
+      ])
+    ).rowCount !== 0;
+  if (overtaken) body.replyToSeq = Number(run.rows[0].covers);
   // What its tools looked up: the counts, and the messages found (each reader is sent only those they can see,
-  // messages/read.ts); the search words only in its own conversation, its owner's to read — in a group they are not kept.
+  // messages/read.ts) — in a group only that group's own, the only ones a reply there may find; the search words only in
+  // its own conversation, its owner's to read — in a group they are not kept.
   const lookups = lookupsOf(reply.lookups);
   if (lookups) body.lookups = lookups;
-  const found = foundOf(reply.found);
+  const here = (r: MessageRef): boolean => own || r.conversationId === conversationId;
+  const found = foundOf(reply.found).filter(here);
   if (found.length > 0) body.found = found;
+  // What its text cites, by number, as `found` is kept (each reader is sent only those they can see); a number whose
+  // message is not kept stays in the text as it is.
+  const cites = citesOf(reply.cites, here);
+  if (Object.keys(cites).length > 0) body.cites = cites;
   const queries = own ? queriesOf(reply.queries) : [];
   if (queries.length > 0) body.queries = queries;
   // Who its mentions mean, read once, now, from the text it stores (Task M: a model's text is typed text), and stored with
@@ -304,6 +345,34 @@ export async function postAsAgent(
     ? noneTriggered()
     : await triggerFromAgent(t, conversationId, message, agent, postedBy, config, () => hearFrom(t, runId, covered, message.seq));
   return { message, duplicate: false, triggered };
+}
+
+/**
+ * The seq of the acknowledgement that stands for what run `runId` of Agent `agentId` answers in `conversationId`, or null:
+ * its own (`ack:<run id>`); else one an earlier run of that Agent there posted for the same question and never answered
+ * (no reply of that run's own) — the question an earlier run answered, its `covers_seq`, is this run's or one of the
+ * calls this run answers (`call_seqs`: a retry in a group answers the failed run's) — so that a retry of a reply that
+ * failed after acknowledging posts no second acknowledgement (Task 6 fix 1, m7). The latest when there are several.
+ */
+export async function standingAcknowledgement(q: Queryable, conversationId: string, agentId: string, runId: string): Promise<number | null> {
+  // Bounded by the question, not by the Agent's run history: only the Agent's acknowledgements after the earliest seq this
+  // run answers are read (an earlier attempt's came after the question it answered), each joined to the run it names.
+  const { rows } = await q.query<{ seq: string }>(
+    `select a.seq::text as seq
+       from agent_runs me
+       join messages a on a.conversation_id = me.conversation_id and a.sender_id = me.agent_id
+                      and a.seq > least(me.covers_seq, coalesce((select min(s) from unnest(me.call_seqs) as c (s)), me.covers_seq))
+                      and a.client_txn like 'ack:%'
+       join agent_runs r on ${postingRun("a", "r")}
+      where me.id = $3 and me.agent_id = $2 and me.conversation_id = $1
+        and (r.id = me.id
+             or ((r.covers_seq = me.covers_seq or r.covers_seq = any(coalesce(me.call_seqs, '{}')))
+                 and not exists (select 1 from messages x where x.conversation_id = r.conversation_id and x.sender_id = r.agent_id and x.client_txn = r.id::text)))
+      order by a.seq desc
+      limit 1`,
+    [conversationId, agentId, runId],
+  );
+  return rows[0] ? Number(rows[0].seq) : null;
 }
 
 /**

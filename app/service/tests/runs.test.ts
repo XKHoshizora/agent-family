@@ -356,6 +356,7 @@ describe("stopping, pausing, failing", () => {
         },
         emit: (run, delta) => port.emit(run, delta),
         post: (run, reply) => port.post(run, reply),
+        acknowledge: (run, said) => port.acknowledge(run, said),
         finish: (run, end, usage, fallback) => port.finish(run, end, usage, fallback),
         release: (run) => port.release(run),
         shouldStop: (run) => port.shouldStop(run),

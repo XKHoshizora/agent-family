@@ -400,6 +400,13 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 }
 .whisper-head { display: flex; align-items: center; gap: 4px; margin: 0; font-size: 12px; color: var(--ink-3); }
 .whisper-text { margin: 4px 0 0; white-space: pre-wrap; }
+/* What a found_elsewhere whisper found, before its buttons: where · who · when, then the text (a long one folded) */
+.whisper-hits { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.whisper-hit { padding: 6px 8px; border-radius: 8px; background: var(--surface); }
+.whisper-hit-meta { margin: 0; font-size: 12px; color: var(--ink-3); }
+.whisper-hit-text { margin: 2px 0 0; white-space: pre-wrap; }
+.whisper-hit-text.folded { display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+.whisper-hit-more { margin-top: 2px; padding: 0; border: 0; background: none; color: var(--purple); font-size: 12px; cursor: pointer; }
 .whisper-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
 .whisper-done > span { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
 /* The chat list: a conversation with whispers waiting for me */
@@ -451,6 +458,13 @@ mark { background: var(--purple-tint); color: inherit; border-radius: 3px; paddi
 }
 .msg-lookups > button:hover { color: var(--purple-dark); }
 .lookup-words { margin: 4px 0 0; }
+/* What a reply cites (〔m3〕): a small superscript number that jumps to the message. */
+.cite { line-height: 0; }
+.cite > button {
+  padding: 0 2px; border: 0; background: none; font: inherit; font-size: 11px; color: var(--purple-dark); cursor: pointer;
+  text-decoration: underline; text-decoration-style: dotted; text-underline-offset: 2px;
+}
+.cite > button:hover { text-decoration-style: solid; }
 .lookup-rows { margin: 4px 0 0; padding: 0; list-style: none; border-left: 3px solid var(--line-strong); }
 .lookup-rows > li.muted { padding: 6px 12px; }
 /* A deleted Agent's model where a live one's is switched (its conversation's header, the details panel): a plain label. */

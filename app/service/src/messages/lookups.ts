@@ -79,6 +79,29 @@ export function foundOf(value: unknown): MessageRef[] {
   return out;
 }
 
+/** A citation's number as a reply writes it (agents/tools/refs.ts): `m` and a whole number from 1, at most six digits. */
+const CITE_KEY = /^m[1-9][0-9]{0,5}$/;
+/** The most citations a reply keeps: the first ones. */
+export const CITES_MAX = 20;
+
+/**
+ * The citations `value` holds (a reply's `cites`, a stored body's): each number (`m3`) with the message it points to,
+ * only those whose number and message are well formed, at most `CITES_MAX`, in their order; `keep` (default all) says
+ * which messages may be pointed to.
+ */
+export function citesOf(value: unknown, keep: (r: MessageRef) => boolean = () => true): Record<string, MessageRef> {
+  const out: Record<string, MessageRef> = {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return out;
+  let n = 0;
+  for (const [key, r] of Object.entries(value)) {
+    if (n >= CITES_MAX) break;
+    if (!CITE_KEY.test(key) || !isMessageRef(r) || !keep(r)) continue;
+    out[key] = { conversationId: r.conversationId, seq: r.seq };
+    n++;
+  }
+  return out;
+}
+
 /** A search word as it is kept: what message text would keep of it (`cleanModelText`), cut to `QUERY_MAX_WEIGHT`; null when it shows nothing. */
 export function queryOf(value: unknown): string | null {
   if (typeof value !== "string") return null;
@@ -102,8 +125,9 @@ export function queriesOf(value: unknown): string[] {
 
 /**
  * What the tools of one reply looked up, as they ran (agents/runtime/worker.ts `toolReply`): a call that ran — its tool
- * answered — counts under its tool's kind (one with no kind counts nothing); what it found and the word it searched for
- * are kept by the rules above, in the order the calls ran. A call answered with a note or an error is never `ran`.
+ * answered with something usable — counts under its tool's kind, and what it found and the word it searched for are kept
+ * by the rules above, in the order the calls ran. A tool with no kind counts nothing and keeps nothing (nothing would
+ * show it). A call answered with a note or an error — the loop's own, or the tool's (`{ error }`) — is never `ran`.
  */
 export class LookedUp {
   private readonly counts: Lookups = {};
@@ -112,7 +136,8 @@ export class LookedUp {
   private readonly words: string[] = [];
 
   ran(kind: Activity | undefined, outcome: { found?: unknown; query?: unknown }): void {
-    if (kind !== undefined) this.counts[kind] = (this.counts[kind] ?? 0) + 1;
+    if (kind === undefined) return;
+    this.counts[kind] = (this.counts[kind] ?? 0) + 1;
     addFound(this.found, this.seen, outcome.found);
     addQuery(this.words, outcome.query);
   }

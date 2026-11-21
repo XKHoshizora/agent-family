@@ -43,11 +43,15 @@ export const CUT_MARK = "…（已截断）";
 /** Starts the newest message's text when it alone was over the budget and lost its beginning. */
 export const CUT_FRONT = "…";
 
-/** A file message's attachment, as the message names it. `image`: one the site shows as a picture (PNG, JPEG, WebP, GIF). */
+/**
+ * A file message's attachment, as the message names it. `image`: one the site shows as a picture (PNG, JPEG, WebP, GIF).
+ * `ref`: its number in a reply offered tools (agents/tools/refs.ts), which its label then carries; none otherwise.
+ */
 export interface ContextAttachment {
   id: string;
   name: string;
   image: boolean;
+  ref?: string;
 }
 
 /** One message as it may be shown: the owner's as `user`, the Agent's as `assistant`. */
@@ -64,8 +68,12 @@ export type AttachmentContent =
   | { type: "pdf"; data: Uint8Array }
   | { type: "text"; text: string; chars: number };
 
-/** `[图片：name]` or `[文件：name]`: an attachment shown by its name. */
-export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): string => (a.image ? `[图片：${a.name}]` : `[文件：${a.name}]`);
+/**
+ * `[图片：name]` or `[文件：name]`: an attachment shown by its name; with its number in a reply offered tools,
+ * `[图片 f2：name]` or `[文件 f1：name]` (what the file tool is called with).
+ */
+export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image" | "ref">): string =>
+  `[${a.image ? "图片" : "文件"}${a.ref === undefined ? "" : ` ${a.ref}`}：${a.name}]`;
 
 /**
  * Tokens the conversation may take: of what the model's context leaves beside its output limit, the system text (as
@@ -76,6 +84,24 @@ export const attachmentLabel = (a: Pick<ContextAttachment, "name" | "image">): s
  */
 export function contextBudget(contextTokens: number, maxOutputTokens: number, system: Pick<SystemText, "rest" | "passage">, ratio = 1, reserved = 0): number {
   return Math.floor((contextTokens - maxOutputTokens - systemTokens(system, ratio) - reserved) * (1 - CONTEXT_HEADROOM));
+}
+
+/**
+ * The person's turn a call ends with when the conversation shown ends with the Agent's own (`endWithPerson`): fixed text,
+ * never anything anyone wrote.
+ */
+export const CONTINUE_TURN = "（请继续回答上面的问题。）";
+
+/**
+ * A call never ends with the Agent's own turn (Task 8 fix 1, X-1: a trailing assistant turn is a prefill to the Anthropic
+ * protocol, which current models refuse, and a continuation to older ones): when `messages` ends with one, a person's turn
+ * of fixed text (`closing`) is added. The tokens it adds (at ratio 1, as `build` counts), 0 when nothing was added.
+ */
+export function endWithPerson(messages: ModelCall["messages"], closing: string = CONTINUE_TURN): number {
+  if (messages[messages.length - 1]?.role !== "assistant") return 0;
+  const part: Part = { type: "text", text: closing };
+  messages.push({ role: "user", parts: [part] });
+  return partTokens(part);
 }
 
 /** The first `QUOTE_MAX_CHARS` characters of a quoted message, each line as `> line`. */
@@ -341,11 +367,13 @@ export class ContextPlan {
 
   /**
    * The call's turns, oldest first: a turn of the Agent's first is left out (a call starts with the owner's), and
-   * consecutive messages of one side are one turn, their parts in order. `tokens`: what they are counted as at ratio 1
-   * (`partTokens`: the estimate admission corrects and settlement learns from, not the plan's count); `fixed`: the part of
-   * it that is images and PDFs at their constants.
+   * consecutive messages of one side are one turn, their parts in order. The turns never end with the Agent's own: what
+   * is shown starts at the person's newest message (the constructor: an Agent's message after it — its acknowledgement a
+   * retry answers after, its own reply a told reply's group ends with — is not shown), and `endWithPerson` holds it even so.
+   * `tokens`: what they are counted as at ratio 1 (`partTokens`: the estimate admission corrects and settlement learns
+   * from, not the plan's count); `fixed`: the part of it that is images and PDFs at their constants.
    */
-  build(): { messages: ModelCall["messages"]; tokens: number; fixed: number } {
+  build(closing: string = CONTINUE_TURN): { messages: ModelCall["messages"]; tokens: number; fixed: number } {
     const oldestFirst = [...this.kept].reverse();
     while (oldestFirst[0]?.entry.role === "assistant") oldestFirst.shift();
     const messages: ModelCall["messages"] = [];
@@ -364,6 +392,7 @@ export class ContextPlan {
       if (last?.role === entry.role) last.parts.push(...parts);
       else messages.push({ role: entry.role, parts });
     }
+    tokens += endWithPerson(messages, closing);
     return { messages, tokens, fixed };
   }
 }

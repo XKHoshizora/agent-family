@@ -9,11 +9,14 @@ import { AppError } from "../errors.ts";
 import { admitRun, raiseHold, type ChargeTo } from "../metering/admit.ts";
 import { assertCount, costMicro, isCount, type Price } from "../metering/prices.ts";
 import { settle } from "../metering/settle.ts";
-import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS } from "../metering/tokens.ts";
+import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS, TOOL_TEXT_FACTOR } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
+import { toldHits, toldPassage, TOLD_TURN } from "./tools/elsewhere.ts";
+import { citesIn, RunRefs, withoutCitations } from "./tools/refs.ts";
+import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { markToolsOff } from "../providers/store.ts";
 import type { Hub } from "../sync/hub.ts";
@@ -36,7 +39,7 @@ import {
 } from "./context.ts";
 import { contextBudget, holdsNewest } from "./runtime/context.ts";
 import { FINAL_LINE } from "./runtime/loop.ts";
-import { postAsAgent } from "./conversation.ts";
+import { postAsAgent, standingAcknowledgement, type AgentReply } from "./conversation.ts";
 import { namePartCalls } from "./mentions.ts";
 import type { Reviewer } from "../memory/reviewer.ts";
 import type { ProactiveScheduler } from "./proactive/scheduler.ts";
@@ -105,13 +108,15 @@ export interface AgentPortDeps {
  * Where a reply's tools come from (`AgentPortDeps.toolbox`): what a run is offered, with at most how many calls of each
  * tool one reply may run (`ToolRun.perTool`) and what each tool's work is (`ToolRun.kinds`: the status while it runs,
  * what it is counted under), and how a call runs (`AgentPort.tool`: never rejecting for a call it cannot answer, its
- * signal honoured; what it found and searched for in its outcome, `ToolOutcome`). Nothing is offered while
- * `TOOLS.enabled` is false. `offer` is asked once per run, in `begin`'s first step (inside its transaction, under the
- * run's locks), before the context is planned.
+ * signal honoured; what it found and searched for in its outcome, `ToolOutcome`) — for the run's scope as `begin` set it
+ * (`RunScope`: whether it is in a group, the numbers it gave the model, how far its conversation had come, its mark).
+ * Nothing is offered while `TOOLS.enabled` is false. `offer` is asked once per run, in `begin`'s first step (inside its
+ * transaction, under the run's locks), before the context is planned; `where.group`: the run is not in its Agent's own
+ * conversation. The service's toolbox is agents/tools/index.ts `createToolbox`.
  */
 export interface Toolbox {
-  offer(run: RunTicket): { tools: ToolSpec[]; perTool: Record<string, number>; kinds: Record<string, Activity> };
-  run(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
+  offer(run: RunTicket, where: { group: boolean }): { tools: ToolSpec[]; perTool: Record<string, number>; kinds: Record<string, Activity> };
+  run(scope: RunScope, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome>;
 }
 
 /** What a toolbox offers a run. */
@@ -119,11 +124,12 @@ type Offer = ReturnType<Toolbox["offer"]>;
 
 /**
  * Tokens a reply offered tools keeps in its context plan for what they bring back (`begin`): two results of
- * `resultMaxWeight` at the plan's `ratio`, but at most a third of `conversation`, what the plan gives the conversation
- * beside the system text and the tools' definitions. Planned only: nothing is held or charged for it.
+ * `resultMaxWeight` at the plan's `ratio`, as tools' text is planned (`TOOL_TEXT_FACTOR`), but at most a third of
+ * `conversation`, what the plan gives the conversation beside the system text and the tools' definitions. Planned only:
+ * nothing is held or charged for it.
  */
 const resultReserve = (resultMaxWeight: number, ratio: number, conversation: number): number =>
-  Math.min(Math.ceil(2 * resultMaxWeight * ratio), Math.floor(conversation / 3));
+  Math.min(Math.ceil(2 * resultMaxWeight * ratio * TOOL_TEXT_FACTOR), Math.floor(conversation / 3));
 
 /**
  * What a provider model's owner is told, once, when a reply finds it cannot use tools (`toolsUnusable`): a whisper in
@@ -237,6 +243,12 @@ interface RunFlags {
   model: RunModel | null;
   /** What its context left out (context.ts `LoadedContext.leftOut`), from `begin` once the call is admitted; null until then, or none. */
   leftOut: LeftOut | null;
+  /**
+   * A reply offered tools, from `begin` once the call is admitted: the numbers it gave the model (refs.ts — its context's
+   * file labels, then what its tools hand over) and how far its conversation had come when it began (`RunScope.heardTo`).
+   * Null for one offered none. Forgotten with the run's flags: no number outlives its reply.
+   */
+  tools: { refs: RunRefs; heardTo: number } | null;
 }
 
 /**
@@ -277,7 +289,7 @@ export class DbAgentPort implements AgentPort {
   private flagsOf(runId: string): RunFlags {
     let flags = this.flags.get(runId);
     if (!flags) {
-      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null, leftOut: null };
+      flags = { stop: false, silenced: false, group: false, mark: null, money: null, model: null, leftOut: null, tools: null };
       this.flags.set(runId, flags);
     }
     return flags;
@@ -437,7 +449,19 @@ export class DbAgentPort implements AgentPort {
     const now = new Date();
     const first = await db.tx(async (t): Promise<
       | { end: RunEnd }
-      | { resolved: Resolved; loaded: LoadedContext; covers: number; coveredBefore: number; key: string; ratio: number; offer: Offer | null; reserved: number }
+      | {
+          resolved: Resolved;
+          loaded: LoadedContext;
+          covers: number;
+          coveredBefore: number;
+          key: string;
+          ratio: number;
+          offer: Offer | null;
+          reserved: number;
+          withoutTools: string | null;
+          tools: { refs: RunRefs; heardTo: number } | null;
+          told: boolean;
+        }
     > => {
       const { agent, state } = await this.lockRun(t, run);
       // Anywhere but the Agent's own conversation is a group: nothing of the reply is streamed (`emit`).
@@ -457,6 +481,11 @@ export class DbAgentPort implements AgentPort {
         if (kept === null) return { end: BLOCKED_SINCE };
         Object.assign(state, kept);
       }
+      // A reply `告诉他们` queued (Task 8): what its whisper found elsewhere, shown to it as material in its system text
+      // (tools/elsewhere.ts `toldPassage`); it answers no call, and is offered no tools. Its whisper gone (deleted 30 days
+      // after it was made) or holding no hits: there is nothing to tell.
+      const told = group ? await toldHits(t, run.id) : null;
+      if (told !== null && told.length === 0) return { end: NOTHING_LEFT };
       // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
       // stays noted, so its follow-up answers the call in the caller's lane.
       if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };
@@ -507,10 +536,15 @@ export class DbAgentPort implements AgentPort {
       // offered tools (`tools`) is not told it has none; one offered none is, as always.
       const system =
         (tools: boolean) =>
-        (mark: string, speakers: readonly Speaker[]): SystemText =>
-          scene
-            ? groupSystemText({ ...agent, bare }, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
+        (mark: string, speakers: readonly Speaker[]): SystemText => {
+          const text = scene
+            ? groupSystemText({ ...agent, bare }, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, told === null ? tools : "told")
             : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
+          // What a reply `告诉他们` queued is to tell, after the rest (measured with it: `rest`).
+          if (told === null) return text;
+          const passage = toldPassage(told);
+          return { text: `${text.text}\n\n${passage}`, rest: `${text.rest}\n\n${passage}`, passage: text.passage };
+        };
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown, and
       // nothing at or before its asker's line (`askerLine`, Task 10b) but the calls it answers (`callsSeen`), read once,
       // here, for the whole run. First, whoever it will hear from beyond what it was asked — everyone who wrote since
@@ -519,23 +553,29 @@ export class DbAgentPort implements AgentPort {
       if (group) await hearFrom(t, run.id, coveredBefore, null);
       const line = group ? await askerLine(t, run.id) : 0;
       const calls = group ? await callsSeen(t, agent.id, run.id, line) : [];
-      if (group && calls.length === 0) return { end: NOTHING_LEFT };
+      if (group && calls.length === 0 && told === null) return { end: NOTHING_LEFT };
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: line, calls } : null;
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
-      // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
+      // The tools the reply is offered, decided in this order: none for a reply `告诉他们` queued (`told`); none while
+      // `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it
-      // offers none; then what they take of the context — their definitions at the plan's ratio and what providers add
-      // around them, reserved as the system text is — and room for what they bring back (below).
-      let offer: Offer | null = config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run) : null;
+      // offers none; then what they take of the context — their definitions at the plan's ratio, as tools' text is planned
+      // (`TOOL_TEXT_FACTOR`), and what providers add around them, reserved as the system text is — and room for what they
+      // bring back (below).
+      let offer: Offer | null = told === null && config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run, { group }) : null;
       if (offer !== null && offer.tools.length === 0) offer = null;
-      const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned) + TOOL_PREAMBLE_TOKENS;
+      // A reply offered tools numbers the files its context labels (`[文件 f1：name]`), so that its file tool can name
+      // them (tools/refs.ts); one offered none is shown them as always.
+      const refs = offer === null ? null : new RunRefs();
+      const numbered = refs === null ? plan : { ...plan, fileRef: (id: string) => refs.file(id) };
+      const definitions = offer === null ? 0 : estimateTokens(JSON.stringify(offer.tools), planned * TOOL_TEXT_FACTOR) + TOOL_PREAMBLE_TOKENS;
       let reserved = definitions;
-      let loaded = await loadContext(t, { ...plan, reserved }, resolved, system(offer !== null), this.deps.drawMark);
+      let loaded = await loadContext(t, { ...numbered, reserved }, resolved, system(offer !== null), this.deps.drawMark);
       if (offer !== null && holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // And room for what the tools bring back, from what that plan gives the conversation (`resultReserve`), with
         // the last call's line: reserved as the definitions are.
         reserved = definitions + estimateTokens(`\n\n${FINAL_LINE}`, planned) + resultReserve(config.tools.resultMaxWeight, planned, loaded.budget);
-        loaded = await loadContext(t, { ...plan, reserved }, resolved, system(true), this.deps.drawMark);
+        loaded = await loadContext(t, { ...numbered, reserved }, resolved, system(true), this.deps.drawMark);
       }
       if (offer !== null && !holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) {
         // With the tools reserved the conversation would not get the room a call needs at least: none are offered, and
@@ -546,7 +586,15 @@ export class DbAgentPort implements AgentPort {
       }
       if (!hasOwnerTurn(loaded)) return { end: loaded.topicStart > 0 && covers <= loaded.topicStart ? STARTED_OVER : BUSY };
       if (!holdsNewest(loaded.entries, loaded.budget, loaded.planRatio)) return { end: TOO_SMALL };
-      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved };
+      // A reply offered tools also carries the text a reply offered none is sent (the same mark and roster), for whenever
+      // its tools are not sent: an upstream that refuses them, or the ordinary call after a later round it refused
+      // (`ModelCall.systemWithoutTools`). Its plan holds it: the tools' definitions it leaves out are larger.
+      const withoutTools = offer === null ? null : system(false)(loaded.mark ?? "", loaded.speakers).text;
+      // How far its conversation has come, read under its row's lock: everyone who wrote up to here is heard (`hearFrom`
+      // above), and its tools show it nothing later (`RunScope.heardTo`).
+      const heard = offer === null ? null : await t.query<{ seq: string }>("select seq::text from conversations where id = $1", [run.conversationId]);
+      const tools = heard === null || refs === null ? null : { refs, heardTo: Number(heard.rows[0]?.seq ?? 0) };
+      return { resolved, loaded, covers, coveredBefore, key, ratio, offer, reserved, withoutTools, tools, told: told !== null };
     });
     if ("end" in first) return first.end;
 
@@ -556,6 +604,8 @@ export class DbAgentPort implements AgentPort {
       context = await buildContext(blobs, first.loaded, first.resolved, log, {
         signal: closing ? AbortSignal.any([closing, deadline]) : deadline,
         stop: () => this.shouldStop(run),
+        // A told reply whose group ends with the Agent's own message ends its call with what it is to do.
+        ...(first.told ? { closing: TOLD_TURN } : {}),
       });
     } catch (err) {
       if (closing?.aborted) throw closing.reason;
@@ -587,7 +637,7 @@ export class DbAgentPort implements AgentPort {
         }
         return { end: ENDED_QUIETLY, told };
       }
-      const { resolved, loaded, covers, key, ratio, offer, reserved } = first;
+      const { resolved, loaded, covers, key, ratio, offer, reserved, withoutTools } = first;
       // The tools the reply is offered (step 1).
       const tools = offer?.tools ?? [];
       // What admission holds for the input: the most it can cost — its text at its utf-8 bytes, at most what the context
@@ -620,9 +670,17 @@ export class DbAgentPort implements AgentPort {
       const marked = await markRead(t, agent.id, run.conversationId, covers);
       const reasoning = resolved.reasoning;
       const planned = planRatio(ratio);
+      // An acknowledgement already stands for what it answers (an earlier attempt's: a retry): it posts none.
+      const acknowledged = tools.length > 0 && (await standingAcknowledgement(t, run.conversationId, run.agentId, run.id)) !== null;
       return {
         prepared: {
-          call: { ...resolved.call, system: loaded.system.text, messages: context.messages, reasoning },
+          call: {
+            ...resolved.call,
+            system: loaded.system.text,
+            ...(tools.length > 0 && withoutTools !== null ? { systemWithoutTools: withoutTools } : {}),
+            messages: context.messages,
+            reasoning,
+          },
           inputChars: input,
           tools,
           toolRun:
@@ -631,6 +689,7 @@ export class DbAgentPort implements AgentPort {
               : {
                   perTool: offer.perTool,
                   kinds: offer.kinds,
+                  acknowledged,
                   contextTokens: resolved.contextTokens,
                   fixedTokens: context.fixedTokens,
                   ratio,
@@ -661,6 +720,7 @@ export class DbAgentPort implements AgentPort {
     flags.leftOut = first.loaded.leftOut;
     const { resolved } = first;
     flags.model = resolved.source === "site" ? { source: "site", id: resolved.name } : { source: "provider", providerId: resolved.providerId!, name: resolved.name };
+    flags.tools = result.prepared.tools.length > 0 ? first.tools : null;
     return result.prepared;
   }
 
@@ -673,11 +733,16 @@ export class DbAgentPort implements AgentPort {
     this.deps.realtime.pushDelta(run.ownerId, run.conversationId, run.id, delta, () => !flags.silenced);
   }
 
-  /** `AgentPort.tool`: through the toolbox that offered the tool (`begin`); with none nothing was offered, and nothing runs. */
+  /**
+   * `AgentPort.tool`: through the toolbox that offered the tool (`begin`), for the run's scope as `begin` set it; with no
+   * toolbox, or for a run this process did not begin with tools, nothing was offered and nothing runs.
+   */
   tool(run: RunTicket, call: ToolCall, signal: AbortSignal): Promise<ToolOutcome> {
     const box = this.deps.toolbox;
-    if (!box) return Promise.reject(new Error("no tool is offered: there is no toolbox"));
-    return box.run(run, call, signal);
+    const flags = this.flags.get(run.id);
+    if (!box || !flags?.tools) return Promise.reject(new Error("no tool is offered to this run"));
+    const scope: RunScope = { ...run, group: flags.group, refs: flags.tools.refs, heardTo: flags.tools.heardTo, mark: flags.mark };
+    return box.run(scope, call, signal);
   }
 
   /**
@@ -773,9 +838,28 @@ export class DbAgentPort implements AgentPort {
    * recovery recorded it.
    */
   async post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty"> {
+    const flags = this.flags.get(run.id);
+    // A reply offered tools: its citations checked against the numbers it was given (tools/refs.ts `citesIn`); one
+    // offered none is posted as written.
+    const reply = flags?.tools ? (({ text, cites }) => ({ ...out, text, cites }))(citesIn(out.text, flags.tools.refs)) : out;
+    return this.posting(run, reply, "reply");
+  }
+
+  /**
+   * `AgentPort.acknowledge`: what the reply said before it called a tool, posted at once as its acknowledgement
+   * (`postAsAgent` "ack", in its own transaction), published after commit as any message of the Agent's — it calls
+   * nobody — and, in a group, dropping the proactive judgement waiting there as the Agent's reply would. It cites
+   * nothing: every citation it writes is taken out (tools/refs.ts `withoutCitations`). Refused, or empty, as `post`.
+   */
+  acknowledge(run: RunTicket, said: { text: string; reasoning: string }): Promise<"posted" | "refused" | "empty"> {
+    return this.posting(run, { ...said, text: withoutCitations(said.text), stopped: false, truncated: false }, "ack");
+  }
+
+  /** `post` and `acknowledge`: `postAsAgent` with the run's mark, announced after commit, its refusals told apart. */
+  private async posting(run: RunTicket, reply: AgentReply, as: "reply" | "ack"): Promise<"posted" | "refused" | "empty"> {
     const mark = this.flags.get(run.id)?.mark ?? null;
     try {
-      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, out, mark, this.deps.config));
+      const posted = await this.deps.db.tx((t) => postAsAgent(t, run.agentId, run.conversationId, run.id, reply, mark, this.deps.config, as));
       if (!posted) return "empty";
       const { message, duplicate, triggered } = posted;
       // In a group, the notices the Agent's message led to follow it; the runs it called for go to their owners, the
@@ -838,7 +922,8 @@ export class DbAgentPort implements AgentPort {
     if (result.reply !== null) this.deps.realtime.pushChargedReply(run.conversationId, run.ownerId, result.reply);
     this.announce(result.ended);
     // A reply stands: the conversation may have something to remember (the reviewer never throws and reads for itself), and
-    // what its context left out may be folded into the pair's rolling summary.
+    // what its context left out may be folded into the pair's rolling summary. An acknowledgement alone is nothing to
+    // remember (memory/review.ts `UNSPOKEN`).
     if (result.reply !== null) {
       this.deps.memory?.noted(run.agentId, run.conversationId);
       if (leftOut !== null && leftOut.messages >= this.deps.config.memory.summaryMinMessages) this.deps.memory?.summarise(run.agentId, run.conversationId, leftOut.to);
@@ -861,16 +946,18 @@ export class DbAgentPort implements AgentPort {
         const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(current.rows[0]) };
         return { ended, followed: followUpOf(null), interrupted: false, reply: null };
       }
-      const posted = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
+      // Its reply (its acknowledgement, if it posted one, is not: `ack:<run id>`).
+      const said = await t.query<{ seq: string }>("select seq::text from messages where conversation_id = $1 and sender_id = $2 and client_txn = $3", [
         run.conversationId,
         run.agentId,
         run.id,
       ]);
+      const reply = said.rows[0];
       // A refused post of a run in a group whose Agent is no longer a member there ends `agent_removed` (looked up only
       // for a refusal nothing else explains).
-      const refused = posted.rowCount === 0 && state.rows[0].interrupted === null && end.status === "cancelled" && end.error === undefined;
+      const refused = reply === undefined && state.rows[0].interrupted === null && end.status === "cancelled" && end.error === undefined;
       const removed = refused && run.conversationId !== agent.conversationId && !(await currentMembership(t, run.conversationId, agent.id));
-      const final = recorded(end, { posted: posted.rowCount !== 0, interrupted: state.rows[0].interrupted, agent, removed });
+      const final = recorded(end, { posted: reply !== undefined, interrupted: state.rows[0].interrupted, agent, removed });
       const ours = final.status === "failed" && final.error === "busy";
       await settle(t, config, run.id, usage, fallback, final.status, now, { forgiveAll: ours, log: this.deps.log });
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
@@ -890,7 +977,7 @@ export class DbAgentPort implements AgentPort {
             ? followUpOf(null)
             : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config),
         interrupted: state.rows[0].interrupted !== null,
-        reply: posted.rows[0] ? Number(posted.rows[0].seq) : null,
+        reply: reply ? Number(reply.seq) : null,
       };
     });
   }

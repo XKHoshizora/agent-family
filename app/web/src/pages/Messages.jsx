@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import { useStore } from "../data/store.jsx";
 import { ME } from "../data/identities.js";
 import { isAgent, isMyAgent, nameOf, ownerOf, publishBlock, senderName } from "../state/selectors.js";
@@ -12,6 +12,7 @@ import { AgentModelSwitch, EVERYWHERE_NOTE, levelLabel } from "./ModelPicker.jsx
 import { AgentText, ProposalCard, Thinking, TopicDivider } from "./AgentChatBits.jsx";
 import { MemoryNotice } from "./MemoryChip.jsx";
 import { ReplyLookups } from "./ReplyLookups.jsx";
+import { CitesContext } from "../ui/cites.jsx";
 import { Reply, RotateCw, FileText, Check, CircleAlert, Download } from "../icons.js";
 
 /** The quoted message as the reader may see it: the service says whether it is visible to them. */
@@ -85,7 +86,18 @@ function FileBody({ msg }) {
   );
 }
 
-function Body({ msg, agent }) {
+/** An Agent's text, with what it cites (`msg.cites`) as links that jump to their messages (`onJump`). */
+function CitingAgentText({ msg, onJump }) {
+  const { cites } = msg;
+  const value = useMemo(() => (cites && onJump ? { cites, onJump } : null), [cites, onJump]);
+  return (
+    <CitesContext.Provider value={value}>
+      <AgentText text={msg.text} id={msg.id} mentions={msg.mentions} />
+    </CitesContext.Provider>
+  );
+}
+
+function Body({ msg, agent, onJump }) {
   if (msg.kind === "image" || msg.kind === "file")
     return (
       <>
@@ -96,7 +108,7 @@ function Body({ msg, agent }) {
   return (
     <div className="bubble">
       <Quote quote={msg.quote} />
-      {agent ? <AgentText text={msg.text} id={msg.id} mentions={msg.mentions} /> : <MentionText text={msg.text} mentions={msg.mentions} />}
+      {agent ? <CitingAgentText msg={msg} onJump={onJump} /> : <MentionText text={msg.text} mentions={msg.mentions} />}
     </div>
   );
 }
@@ -198,7 +210,7 @@ export function MessageItem({ msg, conv, onReply, onJump, flash = false }) {
           {!mine && stamp}
         </div>
         {thinking && <Thinking text={msg.reasoning} />}
-        <Body msg={msg} agent={agent} />
+        <Body msg={msg} agent={agent} onJump={onJump} />
         {/* What the reply looked up with its tools: one quiet line, for whoever reads the reply (its own per conversation). */}
         {agent && <ReplyLookups key={`${conv.id}:${msg.id}`} msg={msg} conv={conv} onJump={onJump} />}
         {ownChat && msg.proposal && <ProposalCard msg={msg} conv={conv} />}

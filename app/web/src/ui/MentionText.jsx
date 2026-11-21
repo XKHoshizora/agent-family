@@ -3,6 +3,7 @@
 // reads a tag as 提到 and the name of whom it means now (`MentionTag`), its tooltip says the same, an Agent's with its
 // owner, and an Agent's tag is drawn apart from a person's.
 import React from "react";
+import { CitedText } from "./cites.jsx";
 import { mentionName, mentionSegments } from "../data/mentions.js";
 import { useStore } from "../data/store.jsx";
 import { entity, isAgent, nameOf, ownerOf } from "../state/selectors.js";
@@ -31,6 +32,6 @@ export function MentionTag({ text, id }) {
 export function MentionText({ text, mentions }) {
   if (!Array.isArray(mentions) || mentions.length === 0) return text ?? "";
   return mentionSegments(text, mentions).map((part, i) =>
-    part.mention ? <MentionTag key={i} text={part.text} id={part.mention.id} /> : <React.Fragment key={i}>{part.text}</React.Fragment>,
+    part.mention ? <MentionTag key={i} text={part.text} id={part.mention.id} /> : <CitedText key={i} text={part.text} />,
   );
 }

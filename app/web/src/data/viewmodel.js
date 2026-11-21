@@ -289,6 +289,22 @@ function foundView(found) {
   return found.filter((f) => f && typeof f.conversationId === "string" && isCountAbove0(f.seq)).map((f) => ({ conversationId: f.conversationId, seq: f.seq }));
 }
 
+/** The numbers of a citation as a reply writes it (〔m3〕). */
+const CITE_NUMBER = /^m[1-9][0-9]{0,5}$/;
+
+/**
+ * A reply's `cites` (of what its text cites, the messages I can see, by number) as `{m3: {conversationId, seq}}`; null
+ * when there is none. A number it does not name is plain text in the reply.
+ */
+function citesView(cites) {
+  if (!cites || typeof cites !== "object" || Array.isArray(cites)) return null;
+  const out = {};
+  for (const [n, at] of Object.entries(cites)) {
+    if (CITE_NUMBER.test(n) && at && typeof at.conversationId === "string" && isCountAbove0(at.seq)) out[n] = { conversationId: at.conversationId, seq: at.seq };
+  }
+  return Object.keys(out).length > 0 ? out : null;
+}
+
 /**
  * The quiet line under a reply that looked things up: 查了 n 次聊天记录 and 看了 n 个文件, joined with ，; time lookups are
  * never in it. Null when there is nothing to say (no lookups, or only at the time).
@@ -375,6 +391,8 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     // Who its mentions mean, as stored when it was sent (data/mentions.js `mentionsIn`: only those that fit its text —
     // a file's caption): shown as tags over their ranges. Never read from the text.
     mentions: kind === "system" ? [] : mentionsIn(m.text ?? "", m.mentions).map((x) => ({ ...x, id: alias(x.id) })),
+    // What its text cites (〔m3〕), of the messages I can see.
+    cites: m.kind === "text" ? citesView(m.cites) : null,
     queries:
       m.kind === "text" && typeof agentId === "string" && m.senderId === agentId && Array.isArray(m.queries)
         ? m.queries.filter((q) => typeof q === "string" && q.trim() !== "")
@@ -383,6 +401,8 @@ function messageView(m, { alias, meId, pair, peerReadSeq, now, nameOf, agentId, 
     notCalled: m.senderId === meId && Array.isArray(m.notCalled) && m.notCalled.length > 0 ? notCalledText(m.notCalled, nameOf) : null,
   };
   if (hidden) view.hidden = true;
+  // An Agent's acknowledgement: shown as any message, but never the chat list's preview (state/selectors.js).
+  if (m.ack === true) view.ack = true;
   if (kind === "image") view.src = attachment.url;
   return view;
 }
@@ -426,11 +446,12 @@ function groupRunRows(conv, slots) {
 /**
  * Whether Agents of the group are answering each other (not a reply a person asked for): the newest message is an
  * Agent's (not a notice) and either its stored mentions (decided by the service when it was posted) mean another Agent
- * that is a member of the group now, or an Agent's reply is being written. It shows 让 Agent 停下. Its text is never read
- * for it.
+ * that is a member of the group now, or an Agent's reply is being written. An acknowledgement never decides it — it calls
+ * nobody, and the reply it belongs to answers whatever came before it —: the newest message but acknowledgements is the
+ * one read. It shows 让 Agent 停下. Its text is never read for it.
  */
 function agentsTalking(model, conv, held, rows) {
-  const last = held[held.length - 1];
+  const last = [...held].reverse().find((m) => m.ack !== true);
   if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
   if (rows.some((r) => r.kind === "replying")) return true;
   const members = new Set(conv.members.map((m) => m.id));
@@ -569,6 +590,8 @@ function agentView(a, version, loaded) {
     ...(typeof a.memory === "boolean" ? { memory: a.memory } : {}),
     ...(typeof a.memoryAsk === "boolean" ? { memoryAsk: a.memoryAsk } : {}),
     ...(typeof a.sharedNotes === "boolean" ? { sharedNotes: a.sharedNotes } : {}),
+    /** 群里没找到时悄悄告诉我: only the owner's view has it. */
+    ...(typeof a.whisperElsewhere === "boolean" ? { whisperElsewhere: a.whisperElsewhere } : {}),
     model: a.model ?? null,
     /** False when the service says its model is not there to call any more (then MODEL_GONE's words, errorTexts.js); true otherwise. */
     modelUsable: a.modelUsable !== false,

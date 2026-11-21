@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
+import { tellFromWhisper } from "../agents/runs.ts";
 import type { Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { perPrincipalLimit } from "../limits.ts";
@@ -14,11 +15,19 @@ import { toWireWhisper, wireWhisperSchema } from "./wire.ts";
  * What answering a whisper of a kind does besides its status: run in the answer's transaction, after the status is written
  * (the conversation's row, the Agent's `for update` and the whisper's are held, in that order: store.ts's lock order; the
  * hook may lock the Agent's row again — `lockAgent` with the whisper's conversation —, then run rows and accounts); what
- * it returns runs once that transaction has committed (pushes, announcements). A throw rolls the answer back. Later tasks
- * fill this in per kind; none does anything yet.
+ * it returns runs once that transaction has committed (pushes, announcements). A throw rolls the answer back (the whisper
+ * stays open). `found_elsewhere` (Task 8): `告诉他们` queues one reply of the Agent in the group that tells what was found
+ * (agents/runs.ts `tellFromWhisper`), announced once committed; `不用` does nothing more.
  */
 export type WhisperHook = (t: Tx, whisper: Whisper, app: FastifyInstance) => Promise<(() => void) | void>;
-export const ANSWER_HOOKS: { [K in WhisperKind]?: Partial<Record<WhisperAnswer, WhisperHook>> } = {};
+export const ANSWER_HOOKS: { [K in WhisperKind]?: Partial<Record<WhisperAnswer, WhisperHook>> } = {
+  found_elsewhere: {
+    accepted: async (t, whisper, app) => {
+      const queued = await tellFromWhisper(t, whisper, app.deps.config);
+      if (queued) return () => app.agentPort.announce(queued);
+    },
+  },
+};
 
 /** Each whisper to its owner's sockets as it is now (after a commit that changed them). */
 export function pushWhispers(realtime: Pick<Hub, "pushWhisper">, whispers: readonly Whisper[]): void {

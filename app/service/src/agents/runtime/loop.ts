@@ -92,6 +92,13 @@ interface Schema {
 
 const isRecord = (v: unknown): v is Record<string, unknown> => v !== null && typeof v === "object" && !Array.isArray(v);
 
+/**
+ * Whether a tool's output is its refusal — an object with an own `error` (the search timed out, its words were too
+ * short, a file cannot be read): the model is sent it as it is, but the call looked nothing up (messages/lookups.ts
+ * `LookedUp`: not counted, nothing it found or searched for kept).
+ */
+export const isRefusal = (output: unknown): boolean => isRecord(output) && Object.hasOwn(output, "error");
+
 /** Whether `value` is of the JSON Schema primitive `type` (an unknown or missing type takes anything). */
 function ofType(value: unknown, type: unknown): boolean {
   switch (type) {

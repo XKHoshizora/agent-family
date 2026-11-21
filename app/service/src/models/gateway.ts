@@ -78,6 +78,12 @@ export interface ModelCall {
   model: string;
   /** Empty: no system text is sent. */
   system: string;
+  /**
+   * With `tools`: the system text to send in place of `system` whenever they are not sent — an upstream that refused
+   * them is asked again without them, or left without them as one that refused before — so that an answer written with
+   * no tools is never told it has some. Absent: `system` either way. Without tools it changes nothing.
+   */
+  systemWithoutTools?: string;
   messages: Array<{ role: "user" | "assistant"; parts: Part[] }>;
   reasoning: ReasoningLevel;
   /** Sent as it is: the reply's limit and, at a level, its thinking allowance (src/models/resolve.ts `outputLimit`). */
@@ -668,6 +674,8 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
   const sent = optionalFields(call, left);
   const thinking = sent.includes("thinking") ? { type: call.reasoning === "none" ? ("disabled" as const) : ("enabled" as const) } : null;
   const tools = sent.includes("tools") ? toolSet(call.tools ?? []) : undefined;
+  // Tools it offers that are not sent: the text for going without them, when the call gives one.
+  const system = offersTools(call) && tools === undefined ? (call.systemWithoutTools ?? call.system) : call.system;
   /** Chat Completions: undecided until the first text, then whether the answer is looked at for `<think>`. */
   let tags: ThinkTags | null | undefined = tap ? undefined : null;
   /** Reasoning arrived in the protocol's own field. */
@@ -687,7 +695,7 @@ async function* attempt(call: ModelCall, fetch: typeof globalThis.fetch, left: R
   try {
     const result = streamText({
       model: languageModel(call, tap ? chatFetch(fetch, tap, thinking, chatRounds(call.steps)) : fetch),
-      ...(call.system === "" ? {} : { instructions: call.system }),
+      ...(system === "" ? {} : { instructions: system }),
       messages: [...toModelMessages(call.messages), ...stepMessages(call.steps ?? [])],
       // A choice only with tools, and `none` only: `auto` is what the SDK sends when none is given.
       ...(tools === undefined ? {} : { tools, ...(call.toolChoice === "none" ? { toolChoice: "none" as const } : {}) }),

@@ -47,6 +47,11 @@ export interface ToolRun {
    * counted under in what the reply looked up (`Reply.lookups`). A tool not named shows nothing and counts nothing.
    */
   readonly kinds: Readonly<Record<string, Activity>>;
+  /**
+   * An acknowledgement already stands for what the reply answers — an earlier attempt at the same question posted one and
+   * never answered (a retry; agents/conversation.ts `standingAcknowledgement`) — so it posts none (worker.ts). Absent: false.
+   */
+  readonly acknowledged?: boolean;
   /** The model's context, in tokens. */
   readonly contextTokens: number;
   /** The images and PDFs the call shows, at their constants (metering/prices.ts): sent, and held, in every round. */
@@ -206,6 +211,13 @@ export interface AgentPort {
    * also one that was nothing but the mark `begin` drew for the run, which the port keeps and takes out, and labels).
    */
   post(run: RunTicket, out: Reply): Promise<"posted" | "refused" | "empty">;
+  /**
+   * Posts what a reply said before it calls a tool, at once, as a message of its own ("先应一声、再交付"): its
+   * acknowledgement — at most one per reply (the worker's rule), the answer coming later as its reply (`post`). Its text
+   * and reasoning are kept as a reply's are (in a group without the run's mark), it calls nobody (its mentions are not
+   * read), and it ends nothing: the run goes on. "refused" and "empty" as `post` says them.
+   */
+  acknowledge(run: RunTicket, said: { text: string; reasoning: string }): Promise<"posted" | "refused" | "empty">;
   /**
    * Settles the call and records how the run ended (one transaction, one usage record), then queues the follow-up for
    * messages that came meanwhile. `usage` is what the upstream reported; with none, `fallback` is what settlement counts,

@@ -78,6 +78,52 @@ describe("while a reply's tool runs", () => {
     expect(bubbleText().trim()).toBe("我先查一下。");
   });
 
+  it("an acknowledgement (what it said before it looked something up, a message of its own) takes the place of what was streamed, and the reply goes on being written", async () => {
+    const { transport } = await openChats();
+    await runPush(transport);
+    await push(transport, { type: "delta", conversationId: A1, runId: R1, text: "我先查一下。" });
+    await elapse(REVEAL_MAX_LAG_MS + 100);
+    expect(bubbleText()).toContain("我先查一下。");
+    await push(transport, { type: "message", message: wire(A1, 3, AG1, "我先查一下。", { ack: true }) });
+    expect(storedLi(3).querySelector(".bubble").textContent).toContain("我先查一下。");
+    // The reply is still being written: what was streamed is that message now.
+    expect(bubbleText().trim()).toBe("正在回复…");
+    await runPush(transport, { activity: "search" });
+    expect(bubbleText().trim()).toBe("正在查聊天记录…");
+    await runPush(transport, { activity: null });
+    await push(transport, { type: "delta", conversationId: A1, runId: R1, text: "叫蜀香。" });
+    await elapse(REVEAL_MAX_LAG_MS + 100);
+    expect(bubbleText()).toContain("叫蜀香。");
+    expect(bubbleText()).not.toContain("我先查一下。");
+    // The answer, a later message: the reply is done being written.
+    await push(transport, { type: "message", message: wire(A1, 4, AG1, "叫蜀香。") });
+    await elapse(REVEAL_MAX_LAG_MS + 2000);
+    expect(bubbleText()).toBeNull();
+    expect(storedLi(4).querySelector(".bubble").textContent).toContain("叫蜀香。");
+  });
+
+  it("an acknowledgement adds nothing to unread and is never the chat list's line; the answer is both", async () => {
+    const { transport } = await openChats({ open: "周末小组" });
+    const row = () => screen.getByText("小助手", { selector: ".list-col .row-name" }).closest(".row");
+    const badge = () => row().querySelector(".badge")?.textContent ?? null;
+    expect([row().querySelector(".row-preview").textContent, badge()]).toEqual(["在吗", null]);
+    await push(transport, { type: "message", message: wire(A1, 3, AG1, "我先查一下。", { ack: true }) });
+    expect([row().querySelector(".row-preview").textContent, badge()]).toEqual(["在吗", null]);
+    await push(transport, { type: "message", message: wire(A1, 4, AG1, "叫蜀香。") });
+    expect([row().querySelector(".row-preview").textContent, badge()]).toEqual(["叫蜀香。", "1"]);
+  });
+
+  it("in a group someone's acknowledgement leaves their reply shown as being written, until the answer comes", async () => {
+    const { transport } = await openChats({ open: "周末小组" });
+    const rows = () => [...timeline().querySelectorAll("li.streaming")].map((li) => li.querySelector(".msg-meta strong").textContent);
+    await push(transport, { type: "run", conversationId: G1, agentId: OAG, state: "replying" });
+    expect(rows()).toEqual(["安的助手"]);
+    await push(transport, { type: "message", message: wire(G1, 1, OAG, "我查查。", { ack: true }) });
+    expect(rows()).toEqual(["安的助手"]);
+    await push(transport, { type: "message", message: wire(G1, 2, OAG, "查到了。") });
+    expect(rows()).toEqual([]);
+  });
+
   it("in a group each reply being written says it too, my Agent's and someone else's alike, and 正在回复… again once the model writes", async () => {
     const { transport } = await openChats({ open: "周末小组" });
     const groupRun = (agentId, fields) => push(transport, { type: "run", conversationId: G1, agentId, ...fields });
@@ -181,6 +227,66 @@ describe("what a reply looked up", () => {
     expect(listMessages).toHaveBeenCalledWith(G1, { before: 32, limit: 50 });
     expect(document.querySelector(".chat-head").textContent).toContain("周末小组");
     expect(storedLi(7).classList.contains("flash")).toBe(true);
+  });
+
+  it("a row that could not be loaded for another reason says so — not that the message is gone; what was loaded is not loaded again when the line is opened again, and one that failed is tried again", async () => {
+    let failing = true;
+    const getMessage = vi.fn(async (_conversationId, seq) => {
+      if (seq === 404) throw apiError(404, "not_found");
+      if (seq === 503) {
+        if (failing) throw apiError(503, "busy");
+        return { message: wire(A1, 1, AG1, "你好，我是小助手"), principals: {} };
+      }
+      return { message: wire(A1, 2, ME_ID, "在吗"), principals: {} };
+    });
+    const found = [{ conversationId: A1, seq: 2 }, { conversationId: A1, seq: 404 }, { conversationId: A1, seq: 503 }];
+    await openChats({ messages: [...BASE, reply(3, { lookups: { search: 1 }, found })], api: { getMessage } });
+    const line = within(lookupLine(3)).getByRole("button", { name: "查了 1 次聊天记录" });
+    const texts = () => [...lookupLine(3).querySelectorAll(".lookup-rows > li")].map((li) => li.querySelector(".row-preview")?.textContent ?? li.textContent);
+    await click(line);
+    expect(texts()).toEqual(["在吗", "这条消息已经看不到了", "没能打开这条消息，请稍后再试"]);
+    expect(getMessage).toHaveBeenCalledTimes(3);
+    await click(line);
+    failing = false;
+    await click(line);
+    // Only the row that failed is asked for again.
+    expect(getMessage.mock.calls.map(([, seq]) => seq)).toEqual([2, 404, 503, 503]);
+    expect(texts()).toEqual(["在吗", "这条消息已经看不到了", "你好，我是小助手"]);
+  });
+
+  it("what a reply cites (〔m1〕) is a small superscript link that jumps to its message, here or in another conversation; a number it was sent nothing for stays the text it is", async () => {
+    const listMessages = vi.fn(async (conversationId) => ({ messages: conversationId === G1 ? [wire(G1, 7, ANN, "蜀香在春熙路，周一休息")] : [], nextBefore: null, principals: {} }));
+    const cites = { m1: { conversationId: A1, seq: 2 }, m2: { conversationId: G1, seq: 7 } };
+    await openChats({
+      messages: [...BASE, wire(A1, 3, AG1, "你问过〔m1〕，在春熙路〔m2〕，也许〔m9〕。", { lookups: { search: 1 }, cites })],
+      groupMessages: [wire(G1, 8, BO, "最新的一条")],
+      api: { listMessages },
+    });
+    const bubble = storedLi(3).querySelector(".bubble");
+    const links = [...bubble.querySelectorAll("sup.cite button")];
+    expect(links.map((b) => [b.textContent, b.getAttribute("aria-label")])).toEqual([
+      ["1", "引用 1"],
+      ["2", "引用 2"],
+    ]);
+    expect(bubble.textContent).toBe("你问过1，在春熙路2，也许〔m9〕。");
+    await click(links[0]);
+    expect(storedLi(2).classList.contains("flash")).toBe(true);
+    await click(links[1]);
+    expect(document.querySelector(".chat-head").textContent).toContain("周末小组");
+    expect(storedLi(7).classList.contains("flash")).toBe(true);
+  });
+
+  it("a cited reply shown as plain text (too long to render, with the note) keeps its citations as links", async () => {
+    const cites = { m1: { conversationId: A1, seq: 2 } };
+    const long = `你问过〔m1〕。${"很长的一段话。".repeat(8000)}`;
+    await openChats({ messages: [...BASE, wire(A1, 3, AG1, long, { lookups: { search: 1 }, cites })] });
+    const bubble = storedLi(3).querySelector(".bubble");
+    expect(bubble.querySelector(".md-note")).not.toBeNull();
+    const links = [...bubble.querySelectorAll("sup.cite button")];
+    expect(links.map((b) => b.getAttribute("aria-label"))).toEqual(["引用 1"]);
+    expect(bubble.textContent.startsWith("你问过1。")).toBe(true);
+    await click(links[0]);
+    expect(storedLi(2).classList.contains("flash")).toBe(true);
   });
 
   it("closing the line hides the list again; in a group no words are shown, whatever a message carries", async () => {

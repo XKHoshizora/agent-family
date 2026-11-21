@@ -68,16 +68,24 @@ export interface Downloadable {
  * The attachment, if and only if the message that carries it (in the attachment's own conversation) is
  * visible to `readerId` right now under the visibility rule. One statement: lookup and permission come
  * from the same snapshot. Null for every other case alike — unknown id, never sent (also for the
- * uploader), another conversation, a late joiner's pre-join message, a member who left or was removed.
+ * uploader), another conversation, a late joiner's pre-join message, a member who left or was removed. `within`: also
+ * only when its message is in that conversation, after seq `after` and at most `upTo` (what a group reply's file tool may
+ * read: agents/tools/file.ts).
  */
-export async function findDownloadable(q: Queryable, readerId: string, attachmentId: string): Promise<Downloadable | null> {
+export async function findDownloadable(
+  q: Queryable,
+  readerId: string,
+  attachmentId: string,
+  within: { conversationId: string; after: number; upTo: number } | null = null,
+): Promise<Downloadable | null> {
   const { rows } = await q.query<{ blob_key: string; name: string; size: string; mime: string; inline: boolean }>(
     `select a.blob_key, a.name, a.size, a.mime, a.inline
        from attachments a
        join messages m on m.id = a.message_id and m.conversation_id = a.conversation_id
        ${VISIBLE_JOIN}
-      where a.id = $2`,
-    [readerId, attachmentId],
+      where a.id = $2
+        and ($3::uuid is null or (a.conversation_id = $3::uuid and m.seq > $4::bigint and m.seq <= $5::bigint))`,
+    [readerId, attachmentId, within?.conversationId ?? null, within?.after ?? 0, within?.upTo ?? 0],
   );
   const r = rows[0];
   return r ? { blobKey: r.blob_key, name: r.name, size: Number(r.size), mime: r.mime, inline: r.inline } : null;

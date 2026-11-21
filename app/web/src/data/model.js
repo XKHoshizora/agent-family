@@ -210,8 +210,11 @@ function advance(list, seq) {
   return position;
 }
 
-/** Counts towards unread: a visible message from someone else that is not a system notice. */
-const countsAsUnread = (m, meId) => m.kind !== "system" && m.senderId !== null && m.senderId !== meId;
+/**
+ * Counts towards unread: a visible message from someone else that is not a system notice, nor an Agent's acknowledgement
+ * (`ack`: what its reply said before it looked something up — the answer after it counts).
+ */
+const countsAsUnread = (m, meId) => m.kind !== "system" && m.ack !== true && m.senderId !== null && m.senderId !== meId;
 
 function unreadAfterReading(conv, list, meId, oldRead, newRead) {
   if (newRead >= conv.position) return 0;
@@ -305,7 +308,9 @@ const fromAgent = (conv, m) => conv.type === "agent" && Boolean(conv.agentId) &&
  * the run ends)? Then its stream is dropped and the run is marked posted, so no later delta brings the bubble back.
  * A pushed message (`pushed`: a push, also a duplicate of one already held) is in order with the run's push: any
  * message of the Agent after it is the reply. Messages from a snapshot or a page (sync, catch-up, history) are not in
- * that order: there the reply is a message of the Agent after the run's `since`.
+ * that order: there the reply is a message of the Agent after the run's `since`. An acknowledgement (`ack`: what the
+ * Agent said before it looked something up, posted as its own message while the reply goes on) is never the reply: a
+ * pushed one only takes the place of what was streamed so far, and the run goes on being written.
  */
 function notePosted(state, conversationId, arrived, pushed) {
   return noteGroupPosted(noteRunPosted(state, conversationId, arrived, pushed), conversationId, arrived, pushed);
@@ -315,9 +320,10 @@ function noteRunPosted(state, conversationId, arrived, pushed) {
   const conv = state.conversations[conversationId];
   const run = state.runs[conversationId];
   if (!conv || !run || run.status !== "running" || run.posted) return state;
-  const replies = arrived.filter((m) => fromAgent(conv, m));
+  const said = arrived.filter((m) => fromAgent(conv, m));
+  const replies = said.filter((m) => m.ack !== true);
   const isReply = pushed ? replies.length > 0 : typeof run.since === "number" && replies.some((m) => m.seq > run.since);
-  if (!isReply) return state;
+  if (!isReply) return pushed && said.length > 0 ? { ...state, streams: without(state.streams, run.id) } : state;
   return { ...state, runs: { ...state.runs, [conversationId]: { ...run, posted: true } }, streams: without(state.streams, run.id) };
 }
 
@@ -331,7 +337,7 @@ function noteGroupPosted(state, conversationId, arrived, pushed) {
   let next = null;
   for (const [agentId, slot] of Object.entries(slots)) {
     if (!replyingSlot(slot) || slot.posted) continue;
-    const replies = arrived.filter((m) => m.senderId === agentId && m.kind !== "system");
+    const replies = arrived.filter((m) => m.senderId === agentId && m.kind !== "system" && m.ack !== true);
     const isReply = pushed ? replies.length > 0 : typeof slot.since === "number" && replies.some((m) => m.seq > slot.since);
     if (!isReply) continue;
     next ??= { ...slots };
@@ -1061,9 +1067,27 @@ const WHISPER_STATUSES = new Set(["open", "accepted", "declined", "expired"]);
 const WHISPER_ACTIONS = new Set(["tell", "dismiss"]);
 
 /** A whisper as the service sends it (README "Whispers"), only the fields shown; null when it is not one. */
+/** At most this many hits of a `found_elsewhere` whisper are kept (the service sends at most 5). */
+const WHISPER_HITS_MAX = 5;
+const HIT_KEYS = ["where", "who", "when", "text"];
+
+/**
+ * What a `found_elsewhere` whisper found (its `detail.hits`, sent to me alone: README "Whispers"): each hit with its four
+ * strings, at most WHISPER_HITS_MAX; a hit that is not one is left out.
+ */
+function hitsOf(w) {
+  const hits = w.kind === "found_elsewhere" ? w.detail?.hits : null;
+  if (!Array.isArray(hits)) return [];
+  return hits
+    .filter((h) => h && typeof h === "object" && HIT_KEYS.every((k) => typeof h[k] === "string"))
+    .slice(0, WHISPER_HITS_MAX)
+    .map(({ where, who, when, text }) => ({ where, who, when, text }));
+}
+
 function whisperOf(w) {
   if (!w || typeof w !== "object" || typeof w.id !== "string" || typeof w.conversationId !== "string") return null;
   if (!Number.isSafeInteger(w.afterSeq) || w.afterSeq < 0 || typeof w.text !== "string" || !WHISPER_STATUSES.has(w.status)) return null;
+  const hits = hitsOf(w);
   return {
     id: w.id,
     conversationId: w.conversationId,
@@ -1074,6 +1098,7 @@ function whisperOf(w) {
     actions: Array.isArray(w.actions) ? [...new Set(w.actions.filter((a) => WHISPER_ACTIONS.has(a)))] : [],
     status: w.status,
     createdAt: typeof w.createdAt === "string" ? w.createdAt : null,
+    ...(hits.length > 0 ? { hits } : {}),
   };
 }
 
@@ -1242,7 +1267,8 @@ export function applyDelta(state, { conversationId, runId, text, reasoning } = {
 /**
  * A new connection: what was streamed before it is not sent again, so every stream goes; and every run held — in an
  * Agent's conversation or in a group — is known only from before it (`joined`) until a push of this connection names it
- * again. (A group slot that then says nothing at all is forgotten.)
+ * again, and what its tool was doing then (`activity`) is not shown any more. (A group slot that then says nothing at
+ * all is forgotten.)
  */
 export function clearStreams(state) {
   const settled = Object.values(state.runs).every((r) => !r || r.joined);
@@ -1252,7 +1278,7 @@ export function clearStreams(state) {
   for (const [id, r] of Object.entries(state.runs)) {
     if (!r || r.joined) runs[id] = r;
     else {
-      const { since: _since, ...rest } = r;
+      const { since: _since, activity: _activity, ...rest } = r;
       runs[id] = { ...rest, joined: true };
     }
   }
@@ -1260,7 +1286,7 @@ export function clearStreams(state) {
   for (const [id, slots] of Object.entries(state.groupRuns)) {
     const kept = {};
     for (const [agentId, slot] of Object.entries(slots)) {
-      const { since: _since, ...rest } = slot;
+      const { since: _since, activity: _activity, ...rest } = slot;
       const known = { ...rest, joined: true };
       if (!emptySlot(known)) kept[agentId] = known;
     }

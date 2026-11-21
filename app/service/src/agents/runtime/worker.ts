@@ -1,10 +1,10 @@
 import { DEFAULT_TOOLS, type ToolsConfig } from "../../config.ts";
 import { LookedUp, type LookupFields } from "../../messages/lookups.ts";
 import { isCount } from "../../metering/prices.ts";
-import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, weightWithin } from "../../metering/tokens.ts";
+import { estimateTokens, holdTokens, TOOL_PREAMBLE_TOKENS, TOOL_TEXT_FACTOR, weightWithin } from "../../metering/tokens.ts";
 import { ModelError, type ModelCall, type ModelGateway, type ToolCall, type ToolResult } from "../../models/gateway.ts";
 import { cleanModelText, hasVisibleText } from "../../schemas.ts";
-import { cutResult, FINAL_LINE, fitsSchema, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
+import { cutResult, FINAL_LINE, fitsSchema, isRefusal, LoopGuard, OVER_CAP, REPEATED, UNUSABLE, withFinalLine } from "./loop.ts";
 import {
   BUSY,
   isRunEnd,
@@ -347,6 +347,24 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     }
   }
 
+  /**
+   * What `out` has said so far, posted as the reply's acknowledgement (`AgentPort.acknowledge`), what is pending of it
+   * pushed first so the owner's stream is in order with the message. Once it is posted, or found to show nothing, the
+   * reply starts again (its text and reasoning are that message's, or nothing); refused, or failing (only the log hears
+   * of a failure), what it said stays the reply's. Whether it was posted.
+   */
+  async function acknowledge(run: RunTicket, out: ReplyStream): Promise<boolean> {
+    out.flushNow();
+    try {
+      const posted = await port.acknowledge(run, { text: cleanModelText(out.text), reasoning: cleanModelText(out.reasoning) });
+      if (posted !== "refused") out.restart();
+      return posted === "posted";
+    } catch (err) {
+      log.error({ err, runId: run.id }, "agent run: could not post its acknowledgement; what it said stays with the reply");
+      return false;
+    }
+  }
+
   /** `AgentPort.toolsUnusable`, whose failure only the log hears of: the reply goes on without the tools either way. */
   async function toolsUnusable(run: RunTicket, why: "refused" | "garbled"): Promise<void> {
     try {
@@ -455,8 +473,9 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * - a repeat (`LoopGuard`) is answered `REPEATED`, a call over its tool's count `OVER_CAP`, neither run;
    * - anything else runs through the port (`runTool`), its output cut (`cutResult`) to `resultMaxWeight` and to what the
    *   model's context has left for the rounds (`room`: what the plan's limit, `ToolRun.limit`, leaves beside the planned
-   *   input, the tools' definitions and the last call's line, at the plan's ratio, and what providers add around the
-   *   definitions — at least the room the plan kept for results).
+   *   input, the tools' definitions and the last call's line, at the plan's ratio — the tools' text, definitions, steps and
+   *   results alike, times `TOOL_TEXT_FACTOR` — and what providers add around the definitions — at least the room the
+   *   plan kept for results).
    * While a tool runs the reply's status says its kind (`AgentPort.activity`, from `ToolRun.kinds`, once per change), and
    * nothing as soon as the model is called again; the counts, the messages found and the search words of the calls that
    * ran and answered go with the posted reply (messages/lookups.ts `LookedUp`).
@@ -472,7 +491,10 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
    * `no_quota`). A stop, the reply's time (`runTimeoutMs` in all; each call and tool also within
    * `AGENT_RUN_TIMEOUT_MS`) and the service closing are honoured between events, between tool calls and between rounds,
    * and end it as they end a reply of one call. Text and reasoning stream as they come, a later round's after a
-   * paragraph break. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
+   * paragraph break. What a round that calls tools has said by then, when it shows anything, is posted at once — before
+   * its tools run — as the reply's acknowledgement (`acknowledge`; one per reply, the first; none when an earlier
+   * attempt's stands, `ToolRun.acknowledged`), and the answer is what the
+   * reply says after it; a later round's text before its calls is part of the answer. One settlement: the rounds' summed usage, or with any round unreported the sum, per round, of its
    * reported usage, or of its estimate when it reported none (the conversation's, plus the tools and the steps it carried,
    * at the model's ratio — no tools for a round whose upstream refused them; what it wrote, its calls included); a round
    * that failed counts only the usage its upstream reported. Only counts and outcome classes are logged.
@@ -481,10 +503,16 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     const limits = opts.tools ?? DEFAULT_TOOLS;
     const deadline = Date.now() + limits.runTimeoutMs;
     const tools = [...prepared.tools];
+    // The ordinary call, made once after a later round its upstream refused: no tools, so the text for going without
+    // them (`ModelCall.systemWithoutTools`) when the call has one.
+    const { systemWithoutTools, ...withTools } = prepared.call;
+    const ordinary: Omit<ModelCall, "signal"> = systemWithoutTools === undefined ? withTools : { ...withTools, system: systemWithoutTools };
     const offered = new Map(tools.map((t) => [t.name, t]));
     const toolsText = JSON.stringify(tools);
     const texts = prepared.call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
-    const room = bounds.limit - bounds.planned - estimateTokens(`${toolsText}\n\n${FINAL_LINE}`, bounds.planRatio) - TOOL_PREAMBLE_TOKENS;
+    /** What the tools' text — definitions, steps, results — is planned at: the plan's ratio times `TOOL_TEXT_FACTOR`. */
+    const toolRatio = bounds.planRatio * TOOL_TEXT_FACTOR;
+    const room = bounds.limit - bounds.planned - estimateTokens(toolsText, toolRatio) - estimateTokens(`\n\n${FINAL_LINE}`, bounds.planRatio) - TOOL_PREAMBLE_TOKENS;
     const guard = new LoopGuard({ maxRounds: limits.maxRounds, perTool: bounds.perTool });
     const out = new ReplyStream((delta) => port.emit(run, delta));
     const meter = new Meter();
@@ -495,6 +523,8 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
     /** The upstream refused a later round: the reply is asked for once more as one without tools (`prepared.call`). */
     let plain = false;
     let unusable = false;
+    /** The reply's acknowledgement was posted, or an earlier attempt's stands (`ToolRun.acknowledged`): no later round's text is. */
+    let acknowledged = bounds.acknowledged === true;
     /** What the tools that ran looked up, for the reply's message. */
     const looked = new LookedUp();
     /** What the reply's status says now: the kind of the tool that is running, or nothing. */
@@ -527,7 +557,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       // The model is called again: no tool is running.
       quiet();
       const request: Omit<ModelCall, "signal"> = plain
-        ? prepared.call
+        ? ordinary
         : {
             ...prepared.call,
             ...(final ? { system: withFinalLine(prepared.call.system), toolChoice: "none" as const } : {}),
@@ -558,7 +588,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         // A later round the upstream refused (400, 422: something in the rounds it will not take, which nothing of ours can
         // mend): once, the reply is asked for as one that offers no tools, from the conversation alone, its cost held first.
         if (steps.length > 0 && !plain && (round.status === 400 || round.status === 422)) {
-          const next = await extend(holdTokens([prepared.call.system, ...texts], bounds.contextTokens, prepared.call.maxOutputTokens));
+          const next = await extend(holdTokens([ordinary.system, ...texts], bounds.contextTokens, prepared.call.maxOutputTokens));
           if (next === "stop" || next === "busy") {
             ending = { last: { finished: CUT_SHORT, failure: null, why: null }, noAnswer: next === "stop" ? NO_QUOTA : BUSY };
             break;
@@ -591,11 +621,14 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         ending = { last: round };
         break;
       }
+      // Work follows: what the reply said before it, when it shows anything, is posted at once as its acknowledgement —
+      // one per reply — and the answer is what it says after it.
+      if (!acknowledged && hasVisibleText(cleanModelText(out.text))) acknowledged = await acknowledge(run, out);
 
       guard.roundDone();
       tally.rounds++;
       const results: ToolResult[] = [];
-      let left = room - stepsTokens - estimateTokens(JSON.stringify({ assistant: finished.assistant, results: [] }), bounds.planRatio);
+      let left = room - stepsTokens - estimateTokens(JSON.stringify({ assistant: finished.assistant, results: [] }), toolRatio);
       let cut: Interruption | null = null;
       for (const toolCall of finished.toolCalls) {
         cut = interrupted();
@@ -633,11 +666,11 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
               output = { error: UNUSABLE };
             } else {
               tally.ran++;
-              const framing = estimateTokens(JSON.stringify({ id: toolCall.id, name: toolCall.name, output: "" }), bounds.planRatio);
+              const framing = estimateTokens(JSON.stringify({ id: toolCall.id, name: toolCall.name, output: "" }), toolRatio);
               try {
-                output = cutResult(ran.outcome.output, Math.min(limits.resultMaxWeight, weightWithin(Math.max(0, left - framing), bounds.planRatio)));
-                // It ran and answered: what it looked up is the reply's.
-                looked.ran(kind, ran.outcome);
+                output = cutResult(ran.outcome.output, Math.min(limits.resultMaxWeight, weightWithin(Math.max(0, left - framing), toolRatio)));
+                // It ran and answered with something usable: what it looked up is the reply's. Its own refusal is not.
+                if (!isRefusal(ran.outcome.output)) looked.ran(kind, ran.outcome);
               } catch {
                 // Not JSON (a port's bug): nothing of it goes to the model.
                 tally.failed++;
@@ -648,7 +681,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
         }
         const result: ToolResult = { id: toolCall.id, name: toolCall.name, output };
         results.push(result);
-        left -= estimateTokens(JSON.stringify(result), bounds.planRatio);
+        left -= estimateTokens(JSON.stringify(result), toolRatio);
       }
       if (cut !== null) {
         ending = { last: { finished: null, failure: null, why: cut } };
@@ -656,7 +689,7 @@ export function createAgentWorker(opts: WorkerOptions): AgentWorker {
       }
       const step = { assistant: finished.assistant, results };
       steps.push(step);
-      stepsTokens += estimateTokens(JSON.stringify(step), bounds.planRatio);
+      stepsTokens += estimateTokens(JSON.stringify(step), toolRatio);
       if (tally.garbled >= 2 && !unusable) {
         unusable = true;
         await toolsUnusable(run, "garbled");

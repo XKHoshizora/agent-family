@@ -225,6 +225,46 @@ export async function createWhisper(
 }
 
 /**
+ * Whether one more `found_elsewhere` whisper of `ownerId` may be made in `conversationId` for Agent `agentId`'s reply run
+ * `runId` (Task 8, agents/tools/elsewhere.ts): not when that reply has made one already (a `found_elsewhere` whisper of the
+ * Agent there made since the run began: an Agent has one reply under way there at most), nor while the owner has `openMax`
+ * open there. Read once before the lookup's query (so a lookup with no room costs none), and again in the whisper's
+ * transaction, under the Agent's row it has locked (so two of one reply are one after the other); it locks nothing itself.
+ */
+export async function roomForFoundElsewhere(
+  t: Queryable,
+  w: { ownerId: string; conversationId: string; agentId: string; runId: string },
+  openMax: number,
+): Promise<boolean> {
+  const { rows } = await t.query<{ mine: boolean; open: number }>(
+    `select exists (select 1 from whispers w join agent_runs r on r.id = $4
+                     where w.owner_id = $1 and w.conversation_id = $2 and w.agent_id = $3 and w.kind = 'found_elsewhere'
+                       and w.created_at >= coalesce(r.started_at, r.created_at)) as mine,
+            (select count(*)::int from whispers w
+              where w.owner_id = $1 and w.conversation_id = $2 and w.kind = 'found_elsewhere' and w.status = 'open') as open`,
+    [w.ownerId, w.conversationId, w.agentId, w.runId],
+  );
+  return rows[0]?.mine === false && (rows[0]?.open ?? 0) < openMax;
+}
+
+/**
+ * The `detail` of the whisper reply run `runId` was queued to tell (`agent_runs.whisper_id`, Task 8's `告诉他们`), read as
+ * the run's owner, its owner (`owner_id = r.owner_id`): undefined when the run was queued for none; null when its whisper
+ * is gone (deleted 30 days after it was made).
+ */
+export async function detailOfRunWhisper(q: Queryable, runId: string): Promise<{ detail: unknown } | null | undefined> {
+  const { rows } = await q.query<{ whisper_id: string | null; found: boolean; detail: unknown }>(
+    `select r.whisper_id, w.id is not null as found, w.body -> 'detail' as detail
+       from agent_runs r left join whispers w on w.id = r.whisper_id and w.owner_id = r.owner_id
+      where r.id = $1`,
+    [runId],
+  );
+  const row = rows[0];
+  if (!row || row.whisper_id === null) return undefined;
+  return row.found ? { detail: row.detail } : null;
+}
+
+/**
  * The owner's answer to their whisper `id`: `accepted` (its `tell` button) or `declined` (its `dismiss`). Changes its status
  * and nothing else (what an answer does for a kind is the caller's, whispers/routes.ts `ANSWER_HOOKS`). "gone" when there is
  * no whisper `id` of `ownerId`'s — anyone else's and none are found by the same single read —, and as well when its Agent
@@ -334,11 +374,16 @@ export async function whispersFrom(q: Queryable, ownerId: string, from: Readonly
  */
 export async function expireOnLeave(t: Tx, conversationId: string, leaving: readonly string[]): Promise<Whisper[]> {
   if (leaving.length === 0) return [];
+  // Its rows taken in id order, as the Agent's delete takes its own (`expireOfAgent`): two of them never wait on each other.
   const { rows } = await t.query<WhisperRow>(
-    `update whispers set status = 'expired', resolved_at = now()
-      where conversation_id = $1 and status = 'open'
-        and owner_id in (select coalesce(p.owner_id, p.id) from principals p where p.id = any($2::uuid[]))
-        and (owner_id = any($2::uuid[]) or agent_id = any($2::uuid[]))
+    `with batch as materialized (
+       select id from whispers
+        where conversation_id = $1 and status = 'open'
+          and owner_id in (select coalesce(p.owner_id, p.id) from principals p where p.id = any($2::uuid[]))
+          and (owner_id = any($2::uuid[]) or agent_id = any($2::uuid[]))
+        order by id for update)
+     update whispers set status = 'expired', resolved_at = now()
+      where id in (select id from batch)
       returning ${COLUMNS}`,
     [conversationId, leaving],
   );
@@ -347,9 +392,13 @@ export async function expireOnLeave(t: Tx, conversationId: string, leaving: read
 
 /** In the transaction that deletes Agent `agentId`: its open whispers, everywhere, are expired. Returns them, for its owner's sockets. */
 export async function expireOfAgent(t: Tx, agentId: string): Promise<Whisper[]> {
+  // In id order, as a leaving takes its own (`expireOnLeave`).
   const { rows } = await t.query<WhisperRow>(
-    `update whispers set status = 'expired', resolved_at = now()
-      where owner_id = (select owner_id from principals where id = $1) and agent_id = $1 and status = 'open'
+    `with batch as materialized (
+       select id from whispers where owner_id = (select owner_id from principals where id = $1) and agent_id = $1 and status = 'open'
+        order by id for update)
+     update whispers set status = 'expired', resolved_at = now()
+      where id in (select id from batch)
       returning ${COLUMNS}`,
     [agentId],
   );

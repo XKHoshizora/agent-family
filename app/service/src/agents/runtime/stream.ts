@@ -101,6 +101,26 @@ export class ReplyStream {
     this.flush();
   }
 
+  /**
+   * What was said so far is about to be posted on its own (the reply's acknowledgement, worker.ts): what is pending of it
+   * goes out now, as at `end` — so the owner's sockets have it before that message.
+   */
+  flushNow(): void {
+    if (!this.held) this.release(this.shown.length);
+    this.flush();
+  }
+
+  /** What was said so far was posted on its own: the reply starts again, its text and reasoning empty, nothing held back. */
+  restart(): void {
+    this.discard();
+    this.text = "";
+    this.reasoning = "";
+    this.shown = "";
+    this.released = 0;
+    this.held = false;
+    this.carry = "";
+  }
+
   /** Drops what is pending (nothing more will be pushed). */
   discard(): void {
     if (this.timer) clearTimeout(this.timer);

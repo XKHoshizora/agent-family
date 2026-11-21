@@ -6,7 +6,7 @@ import { currentMembership, lockForWrite, peekConversation, type ConversationTyp
 import { appendSystem } from "../conversations/system.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
-import type { StoredMessage, SystemEvent } from "../messages/model.ts";
+import { notAcknowledgement, type StoredMessage, type SystemEvent } from "../messages/model.ts";
 import { postingRun } from "../messages/read.ts";
 import { blockedEitherWay } from "../social/relations.ts";
 import type { Hub } from "../sync/hub.ts";
@@ -1147,9 +1147,9 @@ export async function triggerFromAgent(
     return recorded(noneTriggered());
   }
   const limit = config.agentChainLimit;
-  // Every message after a person's latest that is not a notice is an Agent's.
+  // Every message after a person's latest that is not a notice is an Agent's; an acknowledgement is no Agent's turn.
   const inARow = await t.query<{ n: number }>(
-    `select count(*)::int as n from (select 1 from messages where conversation_id = $1 and seq > $2 and kind <> 'system' limit $3) x`,
+    `select count(*)::int as n from (select 1 from messages m where m.conversation_id = $1 and m.seq > $2 and m.kind <> 'system' and ${notAcknowledgement("m")} limit $3) x`,
     [conversationId, human, limit],
   );
   if (inARow.rows[0]!.n >= limit) {
@@ -1257,14 +1257,15 @@ export async function followUp(
   // posted it (`postingRun`) unless that run is its owner's own (or there is none: the owner). A message does not count
   // when it was refused for this Agent when it was posted (`refused_agent_calls`), nor when there is a block, either way,
   // between the Agent's owner and the sender or the sending Agent's owner, or the person behind it (nobody behind it
-  // matches no block).
+  // matches no block), nor when it is an Agent's acknowledgement: it calls nobody (`notAcknowledgement`; whom the
+  // follow-up hears from, `heardIn` below, still counts it).
   const { rows } = await t.query<{ seq: string; kind: "human" | "agent"; sender_id: string; caller_id: string | null; askers: string[] | null }>(
     `select m.seq::text as seq, p.kind, m.sender_id, bh.caller_id, r.asker_ids as askers
        from messages m
        join principals p on p.id = m.sender_id
        left join agent_runs r on p.kind = 'agent' and ${postingRun("m", "r")}
        cross join lateral (select ${behindMessageSql("p", "r")} as caller_id) bh
-      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5
+      where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.kind <> 'system' and m.sender_id <> $5 and ${notAcknowledgement("m")}
         and not exists (select 1 from refused_agent_calls x where x.conversation_id = m.conversation_id and x.seq = m.seq and x.agent_id = $5)
         and not ${blockedEitherWay("$4::uuid", "coalesce(p.owner_id, p.id), bh.caller_id")}
       order by m.seq`,
@@ -1425,10 +1426,14 @@ async function latestRunOf(
   q: Queryable,
   agentId: string,
   conversationId: string,
-): Promise<(RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null }) | null> {
-  const { rows } = await q.query<RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null }>(
+): Promise<
+  (RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null; whisper_id: string | null }) | null
+> {
+  const { rows } = await q.query<
+    RunRow & { covers: string | null; answers: string | null; triggered_by: TriggeredBy; asker_ids: string[] | null; calls: string[] | null; whisper_id: string | null }
+  >(
     `select ${RUN_COLUMNS}, r.covers_seq::text as covers, greatest(r.covers_seq, coalesce(r.pending_seq, 0))::text as answers, r.triggered_by, r.asker_ids,
-            r.call_seqs::text[] as calls
+            r.call_seqs::text[] as calls, r.whisper_id
        from agent_runs r
       where r.agent_id = $1 and r.conversation_id = $2 and r.purpose = 'reply' order by r.created_at desc, r.id desc limit 1`,
     [agentId, conversationId],
@@ -1437,6 +1442,42 @@ async function latestRunOf(
 }
 
 const isGroup = async (q: Queryable, conversationId: string): Promise<boolean> => (await peekConversation(q, conversationId))?.type === "group";
+
+/**
+ * `告诉他们` on a `found_elsewhere` whisper (Task 8; whispers/routes.ts `ANSWER_HOOKS`), in the answer's transaction — the
+ * group's row, the Agent's (for update) and the whisper's held, the whisper answered: ONE reply of the Agent in the group,
+ * queued as its owner's own (`triggered_by` human, lane `own`, the owner its caller and the one it answers), covering the
+ * group's latest message, that is shown the whisper's hits (`agent_runs.whisper_id`, read in port-impl.ts `begin`) and
+ * offered no tools — none when the whisper holds no hits (nothing to tell: null). Held to what a retry by its owner is
+ * held to (`retryInGroup`): 409 `agent_paused`, 400
+ * `invalid_request` when it has no model, 409 `busy_run` while it has a reply queued or running there, 429 `rate_limited`
+ * over the owner's own replies a minute — each thrown, so the answer is rolled back and the whisper stays open, to answer
+ * again. (Its group gone, or the owner or the Agent no longer in it, or the Agent deleted: the answer is 404 before this,
+ * whispers/store.ts `resolveWhisper`.) Lock order: the group's row and the Agent's (already held) → run rows → the owner's
+ * `accounts` row.
+ */
+export async function tellFromWhisper(
+  t: Tx,
+  whisper: { id: string; conversationId: string; ownerId: string; agentId: string; body: { detail?: unknown } },
+  config: RunLimits,
+): Promise<Announced | null> {
+  const hits = (whisper.body.detail as { hits?: unknown } | null | undefined)?.hits;
+  if (!Array.isArray(hits) || hits.length === 0) return null;
+  const agent = await lockAgent(t, whisper.agentId, whisper.conversationId);
+  if (agent.paused) throw new AppError(409, "agent_paused");
+  if (agent.model === null) throw new AppError(400, "invalid_request");
+  const active = await t.query("select 1 from agent_runs where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running') limit 1", [
+    agent.id,
+    whisper.conversationId,
+  ]);
+  if (active.rowCount !== 0) throw new AppError(409, "busy_run");
+  if (await overLaneLimit(t, whisper.ownerId, "own", config)) throw new AppError(429, "rate_limited");
+  const latest = await t.query<{ seq: string }>("select seq::text from conversations where id = $1", [whisper.conversationId]);
+  const owner = callerOf(whisper.ownerId, whisper.ownerId);
+  const queued = await queueRun(t, agent, whisper.conversationId, Number(latest.rows[0]!.seq), "human", owner, [whisper.ownerId]);
+  await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, whisper.id]);
+  return queued;
+}
 
 /**
  * `POST …/runs/retry`: a new queued reply answering up to the owner's last message, only when the conversation's
@@ -1480,7 +1521,7 @@ export async function retryRun(
  * called the failed one (`triggered_by` kept: one an Agent's message called for is still an Agent's, so a member's
  * halt still ends it), and its owner's own whoever's the failed one was (its owner asked again) — answering the same
  * questions as the failed one, so whose they were is kept too (`asker_ids`: the retry asks nothing new), and so are the
- * calls (`call_seqs`). Not for an Agent that
+ * calls (`call_seqs`), and a told reply's whisper (`whisper_id`: it tells again). Not for an Agent that
  * is not in the group now, nor for a run from before it last joined; a run a halt or the Agent's leaving cancelled
  * (`halted`, `agent_removed`) did not fail: 400 like any other; 409 `model_gone` as `retryRun`; 429 over the owner's own
  * `agentRunsPerMinute`. Lock order: the group's row → the Agent's → run rows → the owner's `accounts` row.
@@ -1507,6 +1548,8 @@ async function retryInGroup(
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
   const queued = await queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
   await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));
+  // A told reply (`告诉他们`, Task 8) is told again: the retry keeps its whisper, so it is shown the hits and offered no tools.
+  if (latest.whisper_id !== null) await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, latest.whisper_id]);
   return queued;
 }
 

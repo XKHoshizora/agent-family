@@ -182,6 +182,14 @@ describe("a reply's stream (Review Focus 1 and 2)", () => {
     expect(M.clearStreams(s)).toBe(s);
   });
 
+  it("clearStreams also forgets what a run's tool was doing: known only from before the reconnect, it is not shown until a push says it again", () => {
+    const searching = M.applyRun(loaded(), A1, runOf(R1, "running"), { since: 2, activity: "search" });
+    expect(searching.runs[A1].activity).toBe("search");
+    const s = M.clearStreams(searching);
+    expect(s.runs[A1]).toMatchObject({ id: R1, status: "running", joined: true });
+    expect(s.runs[A1]).not.toHaveProperty("activity");
+  });
+
   it("gone, or a sync that no longer lists the conversation, clears its run and stream", () => {
     const streaming = STEPS.d1(STEPS.running(loaded()));
     const gone = M.applyGone(streaming, A1);
@@ -788,6 +796,10 @@ describe("an Agent's reply in a group (batch 2C)", () => {
     const again = M.clearStreams(s);
     expect(Object.values(again.groupRuns[G1]).every((slot) => slot.joined && !("since" in slot))).toBe(true);
     expect(rows(again)).toHaveLength(2);
+    // What a slot's tool was doing is forgotten too (mine and someone else's alike).
+    const busy = put(put(inGroup(), { ...memberPush("replying"), activity: "file" }), { ...ownerPush(runOf(R1, "running")), activity: "search" });
+    expect(Object.values(busy.groupRuns[G1]).map((slot) => slot.activity)).toEqual(expect.arrayContaining(["file", "search"]));
+    expect(Object.values(M.clearStreams(busy).groupRuns[G1]).some((slot) => "activity" in slot)).toBe(false);
   });
 
   it("several Agents: one row each, in the group's member order, whatever order their pushes came in", () => {

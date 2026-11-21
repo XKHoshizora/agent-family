@@ -6,6 +6,7 @@ import { count } from "../../memory/stats.ts";
 import { attachmentLabel } from "../runtime/context.ts";
 import { personLabel, speakerRole } from "../runtime/prompt.ts";
 import { liveAgent, lockAgent } from "../store.ts";
+import { withoutCitations } from "../tools/refs.ts";
 import { cleanSummary, hasContent, keepLabelled, OWNER, SELF, summaryInput, summarySystem, type SummaryLine } from "./prompt.ts";
 import { countPlaced, placedSpeakers, readPlaced, readSummary, summaryBase, writeSummary, type PlacedMessage, type PlacedReader, type Summary } from "./store.ts";
 
@@ -52,11 +53,12 @@ export const SUMMARY_MAX_MESSAGES = 200;
  */
 function lineOf(m: PlacedMessage, reader: PlacedReader, maxWeight: number): SummaryLine {
   const label = m.attachment ? attachmentLabel({ name: m.attachment.name, image: m.attachment.inline === true }) : "";
-  const text = shown([label, m.text].filter((s) => s !== "").join(" "), maxWeight);
+  // No number a reply's tools gave (`〔m3〕`) means anything to this call or to the summary it writes (tools/refs.ts `withoutCitations`).
+  const text = shown([label, withoutCitations(m.text)].filter((s) => s !== "").join(" "), maxWeight);
   if (m.senderId === reader.agentId) return { who: SELF, text };
   if (!reader.group) return { who: OWNER, text };
   const role = speakerRole(m.senderId, m.kind, reader.ownerId);
-  return { who: personLabel(m.name, m.handle, role === "你的主人"), role: role === "你的主人" ? "主人" : role, text };
+  return { who: personLabel(withoutCitations(m.name), withoutCitations(m.handle), role === "你的主人"), role: role === "你的主人" ? "主人" : role, text };
 }
 
 /**
@@ -120,7 +122,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
     agent.ownerId,
     {
       system: summarySystem(reader.group, memory.summaryMaxWeight),
-      user: summaryInput(old?.text ?? null, taken),
+      user: summaryInput(old === null ? null : withoutCitations(old.text), taken),
       maxOutputTokens: Math.max(memory.reviewMaxOutputTokens, 2 * memory.summaryMaxWeight),
     },
     ctx.closing,
@@ -136,7 +138,7 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
     labelled = kept.text;
   }
   // Headings and nothing else are no summary: never stored, and the messages are not swallowed.
-  const text = labelled !== null && hasContent(labelled) ? labelled : null;
+  const text = labelled !== null && hasContent(labelled) ? withoutCitations(labelled) : null;
   if (text === null) {
     // A refusal for the allowance is counted where it is decided (`memory_refused_allowance`).
     if (!report.refused) count(db, "summary_failed");
@@ -184,9 +186,9 @@ export async function runSummary(deps: SummaryDeps, job: SummaryJob, ctx: Summar
 async function speakerLabels(db: SummaryDeps["db"], reader: PlacedReader, base: number, upTo: number): Promise<{ owner: string; people: Set<string> }> {
   const owner = (await db.query<{ name: string; handle: string }>("select display_name as name, handle::text as handle from principals where id = $1", [reader.ownerId])).rows[0]!;
   const people = new Set(
-    (await placedSpeakers(db, reader, base, upTo)).flatMap((p) => (p.id === reader.ownerId || p.id === reader.agentId ? [] : [personLabel(p.name, p.handle, false)])),
+    (await placedSpeakers(db, reader, base, upTo)).flatMap((p) => (p.id === reader.ownerId || p.id === reader.agentId ? [] : [personLabel(withoutCitations(p.name), withoutCitations(p.handle), false)])),
   );
-  return { owner: personLabel(owner.name, owner.handle, true), people };
+  return { owner: personLabel(withoutCitations(owner.name), withoutCitations(owner.handle), true), people };
 }
 
 const sameSummary = (a: Summary | null, b: Summary | null): boolean =>

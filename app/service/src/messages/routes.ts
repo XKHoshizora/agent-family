@@ -64,6 +64,8 @@ export function registerMessageRoutes(app: FastifyInstance): void {
   const api = app.withTypeProvider<ZodTypeProvider>();
 
   const sendLimit = perPrincipalLimit(app, 120);
+  /** Reads of one message: what a reply's lookups open, a row each, and a jump to a message. */
+  const oneMessageLimit = perPrincipalLimit(app, 120);
 
   api.post(
     "/api/conversations/:id/messages",
@@ -130,6 +132,7 @@ export function registerMessageRoutes(app: FastifyInstance): void {
     },
     async (req) => {
       const me = await requirePrincipal(req);
+      await oneMessageLimit(req, me.id);
       const message = await getMessage(db, me.id, req.params.id, req.params.seq, config);
       if (!message) throw notFound();
       return { message, principals: await principalsOf(db, [message]) };

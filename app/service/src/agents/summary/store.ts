@@ -1,6 +1,6 @@
 import { VISIBLE_JOIN } from "../../conversations/store.ts";
 import type { Queryable } from "../../db.ts";
-import type { AttachmentRef } from "../../messages/model.ts";
+import { notAcknowledgement, type AttachmentRef } from "../../messages/model.ts";
 import { postingRun } from "../../messages/read.ts";
 
 /**
@@ -32,6 +32,7 @@ export interface PlacedReader {
 const PLACED_FROM = `from messages m ${VISIBLE_JOIN}
   left join agent_runs r on m.sender_id = $1 and ${postingRun("m", "r")}`;
 const PLACED_WHERE = `where m.conversation_id = $2 and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
+    and ${notAcknowledgement("m")}
     and m.seq > $3 and coalesce(r.covers_seq, m.seq) > $3 and coalesce(r.covers_seq, m.seq) <= $4
     and ($5::boolean or m.sender_id in ($1, $6))`;
 

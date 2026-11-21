@@ -5,7 +5,7 @@ import { VISIBLE_JOIN, visibleJoin, type ConversationType } from "../conversatio
 import type { Queryable } from "../db.ts";
 import type { StoredOp } from "../memory/apply.ts";
 import { dreamLines, linesOf } from "../memory/lines.ts";
-import { foundOf, lookupsOf, queriesOf, type MessageRef } from "./lookups.ts";
+import { citesOf, foundOf, lookupsOf, queriesOf, type MessageRef } from "./lookups.ts";
 import { MESSAGE_COLUMNS, toStored, type MessageRow, type StoredMessage, type WireMessage } from "./model.ts";
 import { principalsOf, type SyncPrincipal } from "./principals.ts";
 
@@ -107,16 +107,24 @@ function toWireVia(r: ViaRow, config: ReadConfig): WireVia | null {
   return { model, reasoning: r.via_reasoning, points: formatPoints(BigInt(r.via_points)), ...(r.via_proactive === true ? { proactive: true as const } : {}) };
 }
 
-/** A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there; a person's is any string. */
-const RUN_ID_TEXT = "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+/**
+ * A run id as a message's `client_txn` names it: `postAsAgent` writes the run's id there for its reply, and `ack:` and the
+ * run's id for its acknowledgement (`acknowledgementTxn`); a person's is any string.
+ */
+const RUN_TXN_TEXT = "^(ack:)?[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$";
+
+/** The `client_txn` of run `runId`'s acknowledgement (agents/conversation.ts `postAsAgent`, "先应一声、再交付"). */
+export const acknowledgementTxn = (runId: string): string => `ack:${runId}`;
 
 /**
  * SQL: run `run` (an `agent_runs` alias) posted message `message` (a `messages` alias, spliced in: only aliases) — a
- * reply run of its sender in its conversation whose id is the message's `client_txn` (`postAsAgent`). A person's
- * message names no run. The `via` of a reply here, and who is behind an Agent's message (agents/runs.ts `followUp`).
+ * reply run of its sender in its conversation whose id the message's `client_txn` names (`postAsAgent`): its reply, or
+ * its acknowledgement. A person's message names no run. Who is behind an Agent's message (agents/runs.ts `followUp`),
+ * whom it heard from (`heardIn`), where it belongs in a later reply's context (agents/context.ts), and the `via` of a
+ * reply here (its reply only).
  */
 export const postingRun = (message: string, run: string): string =>
-  `${run}.id = case when ${message}.client_txn ~ '${RUN_ID_TEXT}' then ${message}.client_txn::uuid end
+  `${run}.id = case when ${message}.client_txn ~ '${RUN_TXN_TEXT}' then right(${message}.client_txn, 36)::uuid end
    and ${run}.agent_id = ${message}.sender_id and ${run}.conversation_id = ${message}.conversation_id and ${run}.purpose = 'reply'`;
 
 /** A memory-change notice (`memory_changed`, written by the reviewer): for its owner alone. */
@@ -148,12 +156,16 @@ async function memoryChangesOf(q: Queryable, msgs: StoredMessage[]): Promise<{ c
 /** Whether `op` is a note's own operation (a change holds only one kind: a hearsay change has none of these). */
 const isNoteOp = (op: ChangeRow["ops"][number]): op is StoredOp => op.op !== "hearsay_add" && op.op !== "hearsay_drop";
 
-/** What this reader is sent of what a reply's tools looked up besides its counts: the messages found they can see, and the words when they are for them. */
+/**
+ * What this reader is sent of what a reply's tools looked up besides its counts: the messages found they can see, the
+ * words when they are for them, and of what its text cites the messages they can see.
+ */
 interface Looked {
   found: MessageRef[];
   queries: string[];
+  cites: Record<string, MessageRef>;
 }
-const NOTHING_LOOKED: Looked = { found: [], queries: [] };
+const NOTHING_LOOKED: Looked = { found: [], queries: [], cites: {} };
 
 /**
  * Module-private on purpose: it renders whatever quote, proposal, `via` and `looked` it is handed, and the reasoning when
@@ -212,6 +224,7 @@ function toWire(
     // Only an Agent's reply carries these (postAsAgent); nobody can send them. Its reasoning only to whom it is for.
     if (withReasoning && typeof msg.body.reasoning === "string" && msg.body.reasoning !== "") wire.reasoning = msg.body.reasoning;
     if (msg.body.stopped === true) wire.stopped = true;
+    if (msg.body.ack === true) wire.ack = true;
     if (msg.body.truncated === true) wire.truncated = true;
     if (proposal) wire.proposal = toWireProposal(proposal);
     if (via) wire.via = via;
@@ -219,6 +232,7 @@ function toWire(
     if (lookups) wire.lookups = lookups;
     if (looked.found.length > 0) wire.found = looked.found;
     if (looked.queries.length > 0) wire.queries = looked.queries;
+    if (Object.keys(looked.cites).length > 0) wire.cites = looked.cites;
   }
   return wire;
 }
@@ -267,7 +281,7 @@ export async function toWireForReaders(
          select run.source, run.model, run.reasoning, (u.free_micro + u.balance_micro)::text as points, run.lane = 'proactive' as proactive
            from agent_runs run
            join usage_records u on u.run_id = run.id
-          where sender.owner_id = r.reader_id and m.kind = 'text' and ${postingRun("m", "run")}
+          where sender.owner_id = r.reader_id and m.kind = 'text' and ${postingRun("m", "run")} and m.client_txn = run.id::text
             and run.source is not null and run.model is not null and run.reasoning is not null
        ) via on true
       where m.id = any($2::bigint[])`,
@@ -300,12 +314,15 @@ export async function toWireForReaders(
     for (const r of rows) quotes.set(`${r.reader_id}|${r.conversation_id}|${r.seq}`, toStored(r));
   }
 
-  // What a reply's tools found: each message by the same rule as the reply itself (VISIBLE_JOIN, the reader's own), so a
-  // reader is pointed only at what they can open — not at a message from before they joined, of a conversation they are
-  // not in, or that is not there. One query for every reader and reply.
-  const foundIn = new Map(msgs.filter((m) => m.kind === "text" && shownToAnyone.has(m.id)).map((m) => [m.id, foundOf(m.body.found)]));
+  // What a reply's tools found, and what its text cites: each message by the same rule as the reply itself (VISIBLE_JOIN,
+  // the reader's own), so a reader is pointed only at what they can open — not at a message from before they joined, of
+  // a conversation they are not in, or that is not there. One query for every reader and reply, both together.
+  const replies = msgs.filter((m) => m.kind === "text" && shownToAnyone.has(m.id));
+  const foundIn = new Map(replies.map((m) => [m.id, foundOf(m.body.found)]));
+  const citesIn = new Map(replies.map((m) => [m.id, citesOf(m.body.cites)]));
   const refs = new Map<string, MessageRef>();
   for (const list of foundIn.values()) for (const r of list) refs.set(`${r.conversationId}|${r.seq}`, r);
+  for (const cited of citesIn.values()) for (const r of Object.values(cited)) refs.set(`${r.conversationId}|${r.seq}`, r);
   /** reader|conversation|seq of the messages found that this reader can see. */
   const foundSeen = new Set<string>();
   if (refs.size > 0) {
@@ -322,9 +339,11 @@ export async function toWireForReaders(
     for (const r of rows) foundSeen.add(`${r.reader_id}|${r.conversation_id}|${r.seq}`);
   }
   /** What `reader` is sent of what `m`'s tools looked up besides the counts (`key`: reader|message). */
+  const seen = (reader: string) => (r: MessageRef): boolean => foundSeen.has(`${reader}|${r.conversationId}|${r.seq}`);
   const lookedFor = (reader: string, m: StoredMessage, key: string): Looked => ({
-    found: (foundIn.get(m.id) ?? []).filter((r) => foundSeen.has(`${reader}|${r.conversationId}|${r.seq}`)),
+    found: (foundIn.get(m.id) ?? []).filter(seen(reader)),
     queries: queriesFor.has(key) ? queriesOf(m.body.queries) : [],
+    cites: citesOf(citesIn.get(m.id) ?? {}, seen(reader)),
   });
 
   const proposals = await proposalsOf(q, msgs.filter((m) => shownToAnyone.has(m.id)));
