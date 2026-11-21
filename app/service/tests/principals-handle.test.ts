@@ -181,19 +181,40 @@ describe("PATCH /api/me {handle}", () => {
     expect((await api(app, bobby, "GET", "/api/me")).json.handle).toBe("bobby");
   });
 
-  it("with a memory setting in the same body: the person's row is taken before their account's (the lock order a send keeps) — a send holding the person's row, then asking for the account, waits for nothing it holds; both commit (final review m-7)", async () => {
-    const xiaolin = await signUp(app, "xiaolin");
+  /**
+   * `PATCH /api/me {handle, …a memory setting}` beside a transaction that takes `first`, then — once the change is under
+   * way — `then`: whichever order the two take the person's row and their account's in, nothing waits in a circle and both
+   * commit (final review m-7; round 2, N-2: the change locks the person's row as an update that changes no key does, so no
+   * foreign key's check on it ever waits for it).
+   */
+  async function renameBeside(name: string, first: (id: string) => readonly [string, readonly unknown[]], then: (id: string) => readonly [string, readonly unknown[]]) {
+    const who = await signUp(app, name);
     // An account row to update (as a person who has used the site has).
-    await db.query("insert into accounts (principal_id) values ($1) on conflict do nothing", [xiaolin.id]);
-    // A send of theirs: the message's foreign key holds their row (for key share), then a mention asks for their account (lockAccount).
-    const sender = holdThen(db, ["select 1 from principals where id = $1 for key share", [xiaolin.id]], ["select 1 from accounts where principal_id = $1 for update", [xiaolin.id]]);
-    await sender.locked;
-    const renaming = rename(xiaolin, "lin", { dream: false, memoryLanguage: "ja" });
-    // The change waits for the person's row: at its first lock (the order), or — out of order — holding the account.
-    await someoneWaits(db, ["%for update%"]).finally(() => sender.release());
-    await sender.done;
+    await db.query("insert into accounts (principal_id) values ($1) on conflict do nothing", [who.id]);
+    const other = holdThen(db, first(who.id), then(who.id));
+    await other.locked;
+    const renaming = rename(who, `${name}_2`, { dream: false, memoryLanguage: "ja" });
+    // The change either goes through at once or waits for what the other holds; then the other asks for its second lock.
+    await Promise.race([renaming, someoneWaits(db, ["%for update%", "%for no key update%", "%insert into accounts%"])]).finally(() => other.release());
+    await other.done;
     expect((await renaming).status).toBe(200);
-    expect((await api(app, xiaolin, "GET", "/api/me")).json.handle).toBe("lin");
-    expect((await db.query("select dream, memory_language from accounts where principal_id = $1", [xiaolin.id])).rows).toEqual([{ dream: false, memory_language: "ja" }]);
+    expect((await api(app, who, "GET", "/api/me")).json.handle).toBe(`${name}_2`);
+    expect((await db.query("select dream, memory_language from accounts where principal_id = $1", [who.id])).rows).toEqual([{ dream: false, memory_language: "ja" }]);
+  }
+
+  it("with a memory setting in the same body, beside a send of theirs (its message's foreign key holds their row, then a mention locks their account): both commit (final review m-7)", async () => {
+    await renameBeside(
+      "xiaolin",
+      (id) => ["select 1 from principals where id = $1 for key share", [id]],
+      (id) => ["select 1 from accounts where principal_id = $1 for update", [id]],
+    );
+  });
+
+  it("with a memory setting in the same body, beside a settlement of their reply (it locks their account, then its usage record's foreign key takes their row): both commit (round 2, N-2)", async () => {
+    await renameBeside(
+      "xiaoli",
+      (id) => ["select 1 from accounts where principal_id = $1 for update", [id]],
+      (id) => ["select 1 from principals where id = $1 for key share", [id]],
+    );
   });
 });

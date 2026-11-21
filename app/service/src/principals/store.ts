@@ -46,13 +46,15 @@ const UNIQUE_VIOLATION = "23505";
 
 /**
  * Changes person `principalId`'s handle to `handle`, in the caller's transaction: their row locked first, so two changes
- * of theirs take turns. Their current handle: nothing changes (no year starts). Otherwise 429 `handle_change_too_soon`
+ * of theirs take turns — `for no key update`, as the update itself locks it (the handle is no key: its unique index is
+ * partial, and no foreign key points at it), so no foreign key's check on the row (a send of theirs, a settlement, a run
+ * queued for them, all `for key share`) ever waits for a rename, whatever the same transaction locks next (round 2, N-2). Their current handle: nothing changes (no year starts). Otherwise 429 `handle_change_too_soon`
  * (with `availableAt`) within `HANDLE_CHANGE_DAYS` of their last change — said before whether the handle is free — then
  * 409 `handle_taken` when it is not free (`handleFree`; a person who takes it meanwhile meets the unique index: the same
  * 409). The handle they leave is theirs for good (`reserved_handles`). False when nothing changed.
  */
 export async function changeHandle(q: Queryable, principalId: string, handle: string): Promise<boolean> {
-  const { rows } = await q.query<{ handle: string }>("select handle::text as handle from principals where id = $1 and kind = 'human' for update", [principalId]);
+  const { rows } = await q.query<{ handle: string }>("select handle::text as handle from principals where id = $1 and kind = 'human' for no key update", [principalId]);
   const current = rows[0]?.handle;
   if (current === undefined || current === handle) return false;
   const available = await handleChangeAvailableAt(q, principalId);

@@ -94,9 +94,9 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
           await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
         }
         // Once a year (`changeHandle`); the Agents' full handles follow by themselves (`handleOf`). It locks the person's row
-        // (for update) before anything below takes their account's (the settings): the order a send of theirs keeps — its
-        // message holds their row (the foreign key), then a mention locks their account — so the two never wait for each
-        // other in a circle (final review m-7).
+        // as an update that changes no key does (`for no key update`), before anything below takes their account's (the
+        // settings): no foreign key's check on that row — a send of theirs, a settlement, a run queued for them — waits for
+        // it, so nothing waits in a circle whichever order those take the two rows in (final review m-7; round 2, N-2).
         const changed = handle !== undefined && (await changeHandle(t, me.id, handle));
         if (name !== undefined) await updateDisplayName(t, me.id, name);
         if (newNotes !== undefined) await setNewNotes(t, me.id, newNotes);
