@@ -7,7 +7,7 @@ import { appendSystem } from "../conversations/system.ts";
 import type { Queryable, Tx } from "../db.ts";
 import { AppError, notFound } from "../errors.ts";
 import { citesOf, foundOf, lookupsOf, queriesOf, type LookupFields, type MessageRef } from "../messages/lookups.ts";
-import { acknowledgementTxn } from "../messages/read.ts";
+import { acknowledgementTxn, postingRun } from "../messages/read.ts";
 import { insertMessage, MESSAGE_COLUMNS, toStored, type MessageBody, type MessageRow, type StoredMessage } from "../messages/model.ts";
 import { MESSAGE_TEXT_MAX } from "../messages/send.ts";
 import { cleanModelText, hasVisibleText } from "../schemas.ts";
@@ -345,11 +345,15 @@ export async function postAsAgent(
  * failed after acknowledging posts no second acknowledgement (Task 6 fix 1, m7). The latest when there are several.
  */
 export async function standingAcknowledgement(q: Queryable, conversationId: string, agentId: string, runId: string): Promise<number | null> {
+  // Bounded by the question, not by the Agent's run history: only the Agent's acknowledgements after the earliest seq this
+  // run answers are read (an earlier attempt's came after the question it answered), each joined to the run it names.
   const { rows } = await q.query<{ seq: string }>(
     `select a.seq::text as seq
        from agent_runs me
-       join agent_runs r on r.agent_id = me.agent_id and r.conversation_id = me.conversation_id and r.purpose = 'reply'
-       join messages a on a.conversation_id = r.conversation_id and a.sender_id = r.agent_id and a.client_txn = 'ack:' || r.id::text
+       join messages a on a.conversation_id = me.conversation_id and a.sender_id = me.agent_id
+                      and a.seq > least(me.covers_seq, coalesce((select min(s) from unnest(me.call_seqs) as c (s)), me.covers_seq))
+                      and a.client_txn like 'ack:%'
+       join agent_runs r on ${postingRun("a", "r")}
       where me.id = $3 and me.agent_id = $2 and me.conversation_id = $1
         and (r.id = me.id
              or ((r.covers_seq = me.covers_seq or r.covers_seq = any(coalesce(me.call_seqs, '{}')))

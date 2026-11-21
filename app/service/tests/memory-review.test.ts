@@ -387,6 +387,26 @@ describe("when a review runs", () => {
     expect(await reviewedSeq(w.agent.id, w.conv)).toBe(15);
   });
 
+  it("an acknowledgement is no reply: 7 replies and an acknowledgement still wait for the quiet", async () => {
+    const w = await owned("oto");
+    for (let i = 1; i <= 7; i++) await exchange(w, `第${i}句`);
+    expect(reviewCalls()).toHaveLength(0);
+    // What a reply said before it looked something up (an acknowledgement, 先应一声): a message of the Agent's, no reply.
+    await db.query(
+      `with c as (update conversations set seq = seq + 1 where id = $1 returning seq)
+       insert into messages (conversation_id, seq, sender_id, kind, body, client_txn)
+       select $1, c.seq, $2, 'text', jsonb_build_object('text', '我先查一下。', 'ack', true), 'ack:' || gen_random_uuid()::text from c`,
+      [w.conv, w.agent.id],
+    );
+    gateway.reply(ops());
+    memory().noted(w.agent.id, w.conv);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(0);
+    clock.advance(10 * MIN);
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(1);
+  });
+
   it("a topic reset: at once", async () => {
     const w = await owned("pam");
     await exchange(w, "我喜欢茶");

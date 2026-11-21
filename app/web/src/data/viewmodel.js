@@ -453,15 +453,14 @@ function groupRunRows(conv, slots) {
 
 /**
  * Whether Agents of the group are answering each other (not a reply a person asked for): the newest message is an
- * Agent's (not a notice) and either @-mentions another Agent member (by its account name; an acknowledgement's mentions
- * call nobody) or an Agent's reply is being written. It shows 让 Agent 停下.
+ * Agent's (not a notice) and either @-mentions another Agent member (by its account name) or an Agent's reply is being
+ * written. An acknowledgement never decides it — it calls nobody, and the reply it belongs to answers whatever came
+ * before it —: the newest message but acknowledgements is the one read. It shows 让 Agent 停下.
  */
 function agentsTalking(model, conv, held, rows) {
-  const last = held[held.length - 1];
+  const last = [...held].reverse().find((m) => m.ack !== true);
   if (!last || last.kind === "system" || model.principals[last.senderId]?.kind !== "agent") return false;
   if (rows.some((r) => r.kind === "replying")) return true;
-  // An acknowledgement calls nobody, whatever it names.
-  if (last.ack === true) return false;
   const handleOf = (id) => model.agents[id]?.handle ?? model.principals[id]?.handle;
   return conv.members.some(
     (m) => m.id !== last.senderId && model.principals[m.id]?.kind === "agent" && mentionsHandle(last.text, handleOf(m.id)),
