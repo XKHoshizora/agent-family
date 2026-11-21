@@ -471,13 +471,13 @@ conversation. Like a person who left, an Agent that left a group stays named by 
 still read them (a member who has since left too) gets its entry in those reads' `principals` — name, handle, intro,
 field, owner, the current ones. Only its avatar stops: once either membership ends, the avatar route answers as for an
 id that does not exist (old messages then show the generated initial). Nobody but the owner ever receives its persona, persona version, model, reasoning
-level, reply mode, `groupMentions`, `chainBudget`, `othersBudget`, `othersSpentToday`, `proactive`, `proactiveLevel`, `proactiveBudget`, `proactiveSpentToday`, `memory`, `memoryAsk`, `sharedNotes`, `ownerAppellation`, `appellations`, provider, pause or persona proposals, whether a reply of it was one nobody called for (Proactive replies), or the reasoning of its replies there (A reply
+level, reply mode, `groupMentions`, `chainBudget`, `othersBudget`, `othersSpentToday`, `proactive`, `proactiveLevel`, `proactiveBudget`, `proactiveSpentToday`, `memory`, `memoryAsk`, `sharedNotes`, `whisperElsewhere`, `ownerAppellation`, `appellations`, provider, pause or persona proposals, whether a reply of it was one nobody called for (Proactive replies), or the reasoning of its replies there (A reply
 there), or which model and reasoning level a reply of it used and what it cost (`via`, Wire shapes), in any response,
 push or error. Fellow members see a changed name, intro or field the next time they load
 principals, as for people; a changed avatar is pushed to them (`principal`).
 
 **Agent** (owner only): `{"id", "handle", "name", "avatarVersion", "intro", "field", "persona", "personaVersion", "replyMode":
-"always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "othersBudget", "othersSpentToday", "proactive", "proactiveLevel": "less" | "normal" | "more", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "ownerAppellation": string | null, "appellations": [{"principalId", "kind": "human" | "agent", "handle", "name", "appellation"}], "reasoning": "none" | "low" | "medium" | "high" |
+"always" | "mention", "groupMentions": "members" | "owner", "chainBudget", "othersBudget", "othersSpentToday", "proactive", "proactiveLevel": "less" | "normal" | "more", "proactiveBudget", "proactiveSpentToday", "memory", "memoryAsk", "sharedNotes", "whisperElsewhere", "ownerAppellation": string | null, "appellations": [{"principalId", "kind": "human" | "agent", "handle", "name", "appellation"}], "reasoning": "none" | "low" | "medium" | "high" |
 "xhigh" | "max", "model": {"source": "site", "id"} | {"source": "provider", "providerId", "model"} | null, "paused",
 "deleted", "conversationId", "createdAt"}`. `conversationId` is the Agent's dedicated conversation. `groupMentions` says
 who may call the Agent with `@` in a group it is in: `members` (any member, and other Agents there) or `owner` (you
@@ -491,7 +491,8 @@ whether it may reply in a group to a message that called no Agent, when the judg
 default false); `proactiveLevel` how readily (`less`, `normal` — the default —, `more`: the threshold it starts from);
 `memory` (default true) says whether it keeps notes (An Agent's memory); `memoryAsk` (default false) whether a change of
 its notes waits for your yes; `sharedNotes` (default true) whether it uses the notes about you that all your Agents
-share. `proactiveBudget` the most you pay, in points (a string as `chainBudget`, `"1"` to `"100000"`, default `"20"`; never
+share; `whisperElsewhere` (群里没找到时悄悄告诉我, default true) whether, when a search of its reply in a group finds
+nothing there, it looks in its other conversations and whispers what it finds to you (Whispers: `found_elsewhere`). `proactiveBudget` the most you pay, in points (a string as `chainBudget`, `"1"` to `"100000"`, default `"20"`; never
 `null`: a reply nobody asked for always has a limit), in a site day, for those replies; `proactiveSpentToday` (a string of
 points) what they were charged since the site day began, settled charges only, as `othersSpentToday`. `ownerAppellation`
 is what the Agent calls you (1–20 characters, `null`: it uses your display name); `appellations` is what it calls
@@ -520,7 +521,7 @@ the display-name rule), and optionally `intro` (≤ 40), `field` (≤ 20), `pers
 to 100 000 with at most 6 decimals, no sign or exponent: `"50"`, `"12.5"`; default `"50"`), `othersBudget` (the same
 string, or `null` for no limit; default `"20"`), `proactive` (default `false`), `proactiveLevel` (`less`, `normal` or
 `more`, default `normal`), `proactiveBudget` (the string of `chainBudget`, never `null`; default `"20"`), `memory` (default `true`), `memoryAsk`
-(default `false`), `sharedNotes` (default `true`; booleans, never `null`), `ownerAppellation`
+(default `false`), `sharedNotes` (default `true`), `whisperElsewhere` (default `true`; booleans, never `null`), `ownerAppellation`
 (an appellation, below; default `null`), `reasoning` (default `none`), `model` (default `null`). → 201 Agent.
 
 - 409 `proactive_unavailable` for `"proactive": true` while the site has no judgement model (`JUDGE`), before anything is
@@ -584,7 +585,7 @@ for `GET /api/agents`.
 #### `PATCH /api/agents/:id`
 
 *Session: required.* Body (no other key: `handle` and the owner are 400): any of `name`, `intro`, `field`,
-`persona`, `replyMode`, `groupMentions`, `chainBudget`, `othersBudget` (`null`: no limit), `proactive`, `proactiveLevel`, `proactiveBudget`, `memory`, `memoryAsk`, `sharedNotes`, `ownerAppellation` (`null` clears it), `reasoning`, `model` (`null` clears it), under the rules of creation; the
+`persona`, `replyMode`, `groupMentions`, `chainBudget`, `othersBudget` (`null`: no limit), `proactive`, `proactiveLevel`, `proactiveBudget`, `memory`, `memoryAsk`, `sharedNotes`, `whisperElsewhere`, `ownerAppellation` (`null` clears it), `reasoning`, `model` (`null` clears it), under the rules of creation; the
 model and the reasoning level are checked together when either is sent. A `persona` that differs from the stored one
 raises `personaVersion` by one. `catchUp` (boolean, default `false`) goes only with `"memory": true` for an Agent whose memory is
 off: whether the next review may read what was said while it was off, and nothing earlier (An Agent's memory, *Turning it back on*); a `memory` that
@@ -1253,7 +1254,8 @@ it takes no seq (seqs stay gapless for everyone), and sits after the message tha
 made (`afterSeq`; several there: by `createdAt`). So it is in no history, search, unread count, `lastSeq`, quote or
 catch-up `messages`, and never in what an Agent's model is shown. Its owner gets it in the `whisper` push, in
 `GET /api/sync` and catch-up (`whispers`), in the conversation entry's count of open ones that wait for an answer
-(`whispers: n`, only when n > 0; one that offers no button only tells, and is not counted), and from the list route
+(`whispers: n`, only when n > 0, of your current stay there as the lists are; one that offers no button only tells, and
+is not counted), and from the list route
 below; **nobody else gets anything of it — no frame, no key, no count**: a fellow member's
 answers are byte for byte what they were before it existed. Its owner gets only the whispers of their current stay in the
 conversation (made at or after the seq their membership began): after leaving and coming back, the earlier ones are not
@@ -1271,7 +1273,27 @@ periodic sweep of memory changes, on its schedule (`MEMORY.changesSweepMs`; `0` 
 them by hand), in bounded batches that never wait for a row in use. Its row goes with the conversation's, the owner's or
 the Agent's.
 
-The kinds made so far: `tools_off` — a reply found its provider model unable to use tools and the model was marked so
+The kinds made so far: `found_elsewhere` — "not in this group, but I have it elsewhere" (Task 8, design rules 17 and 18;
+`agents/tools/elsewhere.ts`): in a group, a search of a reply found nothing there (Agents and runs, The three tools) and
+the Agent's `whisperElsewhere` is on; the same words, looked for once more — on their own, after the search has answered
+the model, never awaited: what is found, how long it takes or how it fails changes nothing the model is told, nor when —
+in the Agent's other conversations (each it is a current member of but this group, as the Agent sees it, and there only
+what you can read now: a conversation you are a current member of, a message after your joining), found something.
+`群里有人问到的事，这个群里没有，但我在别处查到了。要告诉他们吗？`, buttons `tell` and `dismiss`, `detail` `{"hits": [{"where", "who",
+"when", "text"}]}` — at most 5, the newest first: `where` the group's title (`某个群` without one) or `我们的专属会话`, `who`
+the sender's name as a label shows it, `when` `YYYY-MM-DD HH:mm` in the site's time zone, `text` on one line around the
+words, at most 200 characters, without citations. At most one a reply, and none while you have 3 open `found_elsewhere`
+whispers in that group; with the switch off the second query is not run at all. Made under the group's row and then the
+Agent's (`lockAgent`, before the whisper); one that cannot be made (you or the Agent no longer there, the Agent deleted)
+is simply none. Nobody else learns anything of it; the reply's model is told the group's plain not-found, byte for byte.
+`告诉他们` (accept) queues ONE reply of the Agent in the group (agents/runs.ts `tellFromWhisper`): your own (`triggered_by`
+`human`, lane `own`, you its caller and the one it answers), covering the group's latest message, with the whisper
+(`agent_runs.whisper_id`); its system text gains `主人让你把下面查到的内容告诉大家，用你自己的话简短地说。`, the sentence that
+what follows is material and not instructions, and the hits as one JSON object; it is offered no tools, and posts in the
+group as any reply (a `found_elsewhere` whisper that holds no hits queues nothing). It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
+`busy_run` (a reply of it queued or running there), 429 `rate_limited` (your own replies a minute) — each leaves the
+whisper open, to answer again. `不用` (decline) does nothing more. Vault notes are not involved: hits are messages.
+`tools_off` — a reply found its provider model unable to use tools and the model was marked so
 (Model providers, Models: `tools`): `这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。`, in that reply's
 conversation after the message it was answering, no button (nothing to answer: it stays open until it expires), once per
 model each time it is turned off; not made when its owner or the Agent is no longer a member there (the model is marked
@@ -1291,7 +1313,9 @@ an id that is none: the same answer; what it costs depends on nobody's whispers 
 #### `POST /api/whispers/:id/accept`
 
 *Session: required.* Body: none or `{}`. Answers your open whisper `告诉他们` → 200 WireWhisper with `status: "accepted"`,
-pushed to your sockets too. What an answer does besides that is its kind's (later batches); nothing yet. 409
+pushed to your sockets too. What an answer does besides that is its kind's: for `found_elsewhere`, one reply of the Agent
+in the group (above; its refusals 409 `agent_paused`, 400 `invalid_request`, 409 `busy_run`, 429 `rate_limited` leave
+the whisper open); for the others nothing yet. 409
 `stale_whisper` when it is not open any more (answered, expired) or does not offer `"tell"`; 404 `not_found` for anyone
 else's whisper and an id that is none alike (one read, the same answer, the same cost), and for yours once its Agent is
 deleted or it or you are no longer a member of the conversation. Limit: 30 per minute, shared with decline.
@@ -2955,7 +2979,7 @@ the run that gave it, so an earlier reply's `〔m1〕` copied into this one coul
   up. In a group the run's mark is taken out of whatever someone else wrote. Nothing found: `{"results": [], "note":
   "没找到。"}`, in a group `这个群的记录里没找到。`, followed by `可以在我们的专属会话里让我查所有地方。` only when everyone the
   reply answers is the Agent's owner — never another place's name; in a group nothing found also starts the elsewhere
-  hook (`ToolDeps.elsewhere`, for "not here, but elsewhere"), on its own once the search has answered, never awaited:
+  hook (`ToolDeps.elsewhere`, "not here, but elsewhere": Whispers, `found_elsewhere`), on its own once the search has answered, never awaited:
   whatever it does, how long it takes or how it fails (logged by the failure's kind only) changes nothing the model is
   told, nor when. The reply keeps the messages handed over and the words (What a reply looked up).
 - `current_time` `{}`: `{"date": "2026-11-20", "weekday": "周五", "time": "14:05", "zone": "Asia/Shanghai"}`, where the

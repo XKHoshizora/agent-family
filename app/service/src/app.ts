@@ -29,6 +29,7 @@ import { runReview } from "./memory/pipeline.ts";
 import { setModelEntryMax } from "./memory/clean.ts";
 import { createReviewer, realTimer, type Reviewer, type SetTimer } from "./memory/reviewer.ts";
 import { createAgentPort, recoverRuns, startStaleRunSweep, sweepStaleRuns, type DbAgentPort } from "./agents/port-impl.ts";
+import { createElsewhere } from "./agents/tools/elsewhere.ts";
 import { createToolbox } from "./agents/tools/index.ts";
 import { decideProactive } from "./agents/proactive/decide.ts";
 import { createProactiveScheduler, type ProactiveScheduler } from "./agents/proactive/scheduler.ts";
@@ -412,7 +413,18 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
     log: app.log,
     proactive,
     memory,
-    toolbox: options.tools === false ? null : createToolbox({ db: deps.db, blobs: deps.blobs, searches: deps.searches, config, log: app.log }),
+    toolbox:
+      options.tools === false
+        ? null
+        : createToolbox({
+            db: deps.db,
+            blobs: deps.blobs,
+            searches: deps.searches,
+            config,
+            log: app.log,
+            // In a group, a search that found nothing there: not here, but elsewhere (Task 8).
+            elsewhere: createElsewhere({ db: deps.db, config, realtime: app.realtime, log: app.log }),
+          }),
   });
   const agentWorker = createAgentWorker({
     port: agentPort,

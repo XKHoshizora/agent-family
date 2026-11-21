@@ -109,6 +109,12 @@ export interface SearchRowsOptions {
    * Null: the whole of every conversation searched.
    */
   window: { conversationId: string; after: number; upTo: number; calls: readonly number[] } | null;
+  /**
+   * Besides the reader, only what this principal can read now too (a current member, the message after their joining:
+   * the visibility rule with them as reader) — the owner shown what an Agent found elsewhere (agents/tools/elsewhere.ts).
+   * Absent or null: the reader alone decides.
+   */
+  alsoVisibleTo?: string | null;
   limit: number;
 }
 
@@ -152,6 +158,9 @@ export async function searchRows(q: Queryable, readerId: string, o: SearchRowsOp
         and ($6::date is null or m.created_at >= ($6::date + 1)::timestamp at time zone $7::text)
         and ($8::uuid is null or m.conversation_id <> $8::uuid or (m.seq > $9::bigint and m.seq <= $10::bigint)
              or (m.seq = any($11::bigint[]) and (m.seq > $9::bigint or (m.body ->> 'text') ilike $3 escape '\\')))
+        and ($13::uuid is null or exists (select 1 from memberships ov
+                                           where ov.conversation_id = m.conversation_id and ov.principal_id = $13::uuid
+                                             and ov.left_seq is null and ov.joined_seq < m.seq))
       order by m.created_at desc, m.conversation_id desc, m.seq desc
       limit $12`,
     [
@@ -167,6 +176,7 @@ export async function searchRows(q: Queryable, readerId: string, o: SearchRowsOp
       o.window?.upTo ?? 0,
       o.window?.calls ?? [],
       o.limit,
+      o.alsoVisibleTo ?? null,
     ],
   );
   return rows;

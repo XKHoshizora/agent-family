@@ -1336,6 +1336,42 @@ async function latestRunOf(
 const isGroup = async (q: Queryable, conversationId: string): Promise<boolean> => (await peekConversation(q, conversationId))?.type === "group";
 
 /**
+ * `告诉他们` on a `found_elsewhere` whisper (Task 8; whispers/routes.ts `ANSWER_HOOKS`), in the answer's transaction — the
+ * group's row, the Agent's (for update) and the whisper's held, the whisper answered: ONE reply of the Agent in the group,
+ * queued as its owner's own (`triggered_by` human, lane `own`, the owner its caller and the one it answers), covering the
+ * group's latest message, that is shown the whisper's hits (`agent_runs.whisper_id`, read in port-impl.ts `begin`) and
+ * offered no tools — none when the whisper holds no hits (nothing to tell: null). Held to what a retry by its owner is
+ * held to (`retryInGroup`): 409 `agent_paused`, 400
+ * `invalid_request` when it has no model, 409 `busy_run` while it has a reply queued or running there, 429 `rate_limited`
+ * over the owner's own replies a minute — each thrown, so the answer is rolled back and the whisper stays open, to answer
+ * again. (Its group gone, or the owner or the Agent no longer in it, or the Agent deleted: the answer is 404 before this,
+ * whispers/store.ts `resolveWhisper`.) Lock order: the group's row and the Agent's (already held) → run rows → the owner's
+ * `accounts` row.
+ */
+export async function tellFromWhisper(
+  t: Tx,
+  whisper: { id: string; conversationId: string; ownerId: string; agentId: string; body: { detail?: unknown } },
+  config: RunLimits,
+): Promise<Announced | null> {
+  const hits = (whisper.body.detail as { hits?: unknown } | null | undefined)?.hits;
+  if (!Array.isArray(hits) || hits.length === 0) return null;
+  const agent = await lockAgent(t, whisper.agentId, whisper.conversationId);
+  if (agent.paused) throw new AppError(409, "agent_paused");
+  if (agent.model === null) throw new AppError(400, "invalid_request");
+  const active = await t.query("select 1 from agent_runs where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running') limit 1", [
+    agent.id,
+    whisper.conversationId,
+  ]);
+  if (active.rowCount !== 0) throw new AppError(409, "busy_run");
+  if (await overLaneLimit(t, whisper.ownerId, "own", config)) throw new AppError(429, "rate_limited");
+  const latest = await t.query<{ seq: string }>("select seq::text from conversations where id = $1", [whisper.conversationId]);
+  const owner = callerOf(whisper.ownerId, whisper.ownerId);
+  const queued = await queueRun(t, agent, whisper.conversationId, Number(latest.rows[0]!.seq), "human", owner, [whisper.ownerId]);
+  await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, whisper.id]);
+  return queued;
+}
+
+/**
  * `POST …/runs/retry`: a new queued reply answering up to the owner's last message, only when the conversation's
  * latest run failed. 404 unless it is the caller's Agent conversation; 409 `agent_deleted` / `agent_paused`; 409
  * `busy_run` while a reply is queued or running; 400 when the latest run did not fail (or there is none) or the Agent

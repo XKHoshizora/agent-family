@@ -598,6 +598,8 @@ function agentView(a, version, loaded) {
     ...(typeof a.memory === "boolean" ? { memory: a.memory } : {}),
     ...(typeof a.memoryAsk === "boolean" ? { memoryAsk: a.memoryAsk } : {}),
     ...(typeof a.sharedNotes === "boolean" ? { sharedNotes: a.sharedNotes } : {}),
+    /** 群里没找到时悄悄告诉我: only the owner's view has it. */
+    ...(typeof a.whisperElsewhere === "boolean" ? { whisperElsewhere: a.whisperElsewhere } : {}),
     model: a.model ?? null,
     reasoning: a.reasoning ?? "none",
     paused: Boolean(a.paused),

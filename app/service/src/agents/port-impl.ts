@@ -14,6 +14,7 @@ import { loadNotes } from "../memory/passage.ts";
 import { markRead, type ReadEvents } from "../messages/read.ts";
 import type { ToolCall, ToolSpec } from "../models/gateway.ts";
 import { resolveModel, type Resolved } from "../models/resolve.ts";
+import { toldHits, toldPassage } from "./tools/elsewhere.ts";
 import { citesIn, RunRefs, withoutCitations } from "./tools/refs.ts";
 import type { RunScope } from "./tools/index.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
@@ -450,6 +451,11 @@ export class DbAgentPort implements AgentPort {
       // In a group: the Agent must still be a member there (nothing else may have marked the run yet).
       const scene = group ? await loadGroupScene(t, agent, run.conversationId) : null;
       if (group && scene === null) return { end: REMOVED };
+      // A reply `告诉他们` queued (Task 8): what its whisper found elsewhere, shown to it as material in its system text
+      // (tools/elsewhere.ts `toldPassage`); it answers no call, and is offered no tools. Its whisper gone (deleted 30 days
+      // after it was made) or holding no hits: there is nothing to tell.
+      const told = group ? await toldHits(t, run.id) : null;
+      if (told !== null && told.length === 0) return { end: NOTHING_LEFT };
       // A reply nobody asked for that someone has called since its claim: no unasked remark now. What was noted on it
       // stays noted, so its follow-up answers the call in the caller's lane.
       if (state.lane === "proactive" && Number(state.pending_seq ?? 0) > Number(state.covers_seq ?? 0)) return { end: ENDED_QUIETLY };
@@ -496,10 +502,15 @@ export class DbAgentPort implements AgentPort {
       // offered tools (`tools`) is not told it has none; one offered none is, as always.
       const system =
         (tools: boolean) =>
-        (mark: string, speakers: readonly Speaker[]): SystemText =>
-          scene
+        (mark: string, speakers: readonly Speaker[]): SystemText => {
+          const text = scene
             ? groupSystemText(agent, { displayName }, withRoster(scene, speakers), now, config.siteTimezone, mark, state.lane === "proactive", notes, tools)
             : systemText(agent, { displayName }, now, agent.persona === "" ? "onboarding" : "normal", config.siteTimezone, notes, tools);
+          // What a reply `告诉他们` queued is to tell, after the rest (measured with it: `rest`).
+          if (told === null) return text;
+          const passage = toldPassage(told);
+          return { text: `${text.text}\n\n${passage}`, rest: `${text.rest}\n\n${passage}`, passage: text.passage };
+        };
       // In a group, at most `AGENT_GROUP_CONTEXT_TOKENS` of its latest `GROUP_CONTEXT_MESSAGES` messages are shown, and
       // nothing at or before its asker's line (`askerLine`, Task 10b) but the calls it answers (`callsSeen`), read once,
       // here, for the whole run. First, whoever it will hear from beyond what it was asked — everyone who wrote since
@@ -508,15 +519,16 @@ export class DbAgentPort implements AgentPort {
       if (group) await hearFrom(t, run.id, coveredBefore, null);
       const line = group ? await askerLine(t, run.id) : 0;
       const calls = group ? await callsSeen(t, agent.id, run.id, line) : [];
-      if (group && calls.length === 0) return { end: NOTHING_LEFT };
+      if (group && calls.length === 0 && told === null) return { end: NOTHING_LEFT };
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: line, calls } : null;
       const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
-      // The tools the reply is offered, decided in this order: none while `TOOLS.enabled` is false; none for a model that
+      // The tools the reply is offered, decided in this order: none for a reply `告诉他们` queued (`told`); none while
+      // `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it
       // offers none; then what they take of the context — their definitions at the plan's ratio, as tools' text is planned
       // (`TOOL_TEXT_FACTOR`), and what providers add around them, reserved as the system text is — and room for what they
       // bring back (below).
-      let offer: Offer | null = config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run, { group }) : null;
+      let offer: Offer | null = told === null && config.tools.enabled && resolved.tools && this.deps.toolbox ? this.deps.toolbox.offer(run, { group }) : null;
       if (offer !== null && offer.tools.length === 0) offer = null;
       // A reply offered tools numbers the files its context labels (`[文件 f1：name]`), so that its file tool can name
       // them (tools/refs.ts); one offered none is shown them as always.

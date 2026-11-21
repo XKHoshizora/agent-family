@@ -2130,3 +2130,53 @@ describe("the 记忆 section of the form", () => {
     expect(second.mock.calls[0][0]).not.toHaveProperty("memory");
   });
 });
+
+describe("群里没找到时悄悄告诉我", () => {
+  const LABEL = "群里没找到时悄悄告诉我";
+  const HELPER = "它在别处查到了，会先悄悄问你要不要告诉大家。";
+  const sw = () => inMain().getByLabelText(LABEL);
+  const save = () => click(inMain().getByRole("button", { name: "保存" }));
+  const openEditOf = async (fields = {}) => {
+    const record = agentOf(AG1, { model: SITE_MODEL, ...fields });
+    const patchAgent = vi.fn(async (_id, patch) => ({ ...record, ...patch }));
+    const app = await openAgents({ agents: [record], api: { patchAgent } });
+    app.transport.handlers.agent = () => record;
+    await openRow("小助手");
+    await click(inMain().getByRole("button", { name: /编辑/ }));
+    return { patchAgent };
+  };
+
+  it("a switch with its helper, on when the record says nothing (the service's default), showing the record's value", async () => {
+    await openEditOf();
+    expect(sw().getAttribute("role")).toBe("switch");
+    expect(sw().checked).toBe(true);
+    expect(sw().getAttribute("aria-describedby")).toBe(inMain().getByText(HELPER).id);
+    cleanup();
+    await openEditOf({ whisperElsewhere: false });
+    expect(sw().checked).toBe(false);
+  });
+
+  it("editing sends it only when changed; creating sends it only when off", async () => {
+    const { patchAgent } = await openEditOf({ whisperElsewhere: true });
+    fireEvent.click(sw());
+    await save();
+    expect(patchAgent.mock.calls[0][1]).toEqual({ whisperElsewhere: false });
+    cleanup();
+    const createAgent = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent } });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    await click(createButton());
+    expect(createAgent.mock.calls[0][0]).not.toHaveProperty("whisperElsewhere");
+    cleanup();
+    const off = vi.fn(async () => agentOf(AG1));
+    await openAgents({ api: { createAgent: off } });
+    await openCreate();
+    type("名称", "MyBot");
+    await chooseModel("小模型 · 免费");
+    fireEvent.click(sw());
+    await click(createButton());
+    expect(off.mock.calls[0][0]).toMatchObject({ whisperElsewhere: false });
+  });
+});

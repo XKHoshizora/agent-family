@@ -45,6 +45,12 @@ const MEMORY_KEYS = Object.keys(MEMORY_DEFAULTS);
 /** Under 主动参与群聊: what it does, or — the site having no judgement model — why it does nothing now. */
 const PROACTIVE_HELPER = "打开后，群里有人说到它擅长的事，没 @ 它它也可能回复。花的是你的点。";
 const PROACTIVE_LOST = "站点现在没有配置判断模型，主动参与不会生效。可以先关掉。";
+/**
+ * 群里没找到时悄悄告诉我 (`whisperElsewhere`, on unless the record says off): when a search in a group finds nothing there but
+ * it has it elsewhere, it whispers to me first (only I see it) and asks whether to tell the group.
+ */
+const ELSEWHERE_LABEL = "群里没找到时悄悄告诉我";
+const ELSEWHERE_HELPER = "它在别处查到了，会先悄悄问你要不要告诉大家。";
 // A budget's amount, either of them, as the service takes it.
 const BUDGET_MIN = 1;
 const BUDGET_MAX = 100000;
@@ -121,6 +127,7 @@ const recordFields = (a) => ({
   proactive: a?.proactive === true,
   proactiveLevel: isProactiveLevel(a?.proactiveLevel) ? a.proactiveLevel : "normal",
   proactiveBudget: budgetOf(a?.proactiveBudget) ?? PROACTIVE_BUDGET_DEFAULT,
+  whisperElsewhere: a?.whisperElsewhere !== false,
   ownerAppellation: a?.ownerAppellation ?? "",
   // The service's defaults when the record says nothing: remembers, tells me nothing first, uses the shared 关于我.
   memory: a?.memory !== false,
@@ -372,6 +379,8 @@ export function AgentForm({ agent = null }) {
     // Said only when it is on (off is the service's default).
     if (proactiveAsked) Object.assign(body, { proactive: true, proactiveLevel: f.proactiveLevel, proactiveBudget: budgetOf(f.proactiveBudget) });
     if (ownerAppellation) body.ownerAppellation = ownerAppellation;
+    // Said only when it is off (on is the service's default).
+    if (!f.whisperElsewhere) body.whisperElsewhere = false;
     // Said only when it is not the service's default.
     for (const key of MEMORY_KEYS) if (f[key] !== MEMORY_DEFAULTS[key]) body[key] = f[key];
     body.reasoning = reasoning;
@@ -421,6 +430,7 @@ export function AgentForm({ agent = null }) {
       if (mine("proactive")) patch.proactive = f.proactive;
       if (proactiveAsked) for (const key of ["proactiveLevel", "proactiveBudget"]) if (mine(key)) patch[key] = storedValue(key, f);
     }
+    if (mine("whisperElsewhere")) patch.whisperElsewhere = f.whisperElsewhere;
     // 它怎么称呼你: cleared (emptied) is null, which the service reads as none.
     if (mine("ownerAppellation")) patch.ownerAppellation = ownerAppellation || null;
     for (const key of MEMORY_KEYS) if (mine(key)) patch[key] = f[key];
@@ -640,6 +650,9 @@ export function AgentForm({ agent = null }) {
             )}
           </>
         )}
+        <div className="field">
+          <Switch checked={f.whisperElsewhere} onChange={setSwitch("whisperElsewhere")} label={ELSEWHERE_LABEL} hint={ELSEWHERE_HELPER} hintClass="field-hint" />
+        </div>
         <fieldset className="form-section">
           <legend>称呼</legend>
           <Field label="它怎么称呼你" hint="最多 20 个字。只影响它怎么叫你，不影响它把谁当主人。" error={shown("ownerAppellation")}>
