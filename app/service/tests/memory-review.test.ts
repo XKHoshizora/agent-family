@@ -2104,6 +2104,29 @@ describe("the vault only fills inwards, across notes: a replace or an add beside
     ]);
   });
 
+  it("the review's own apply, its pair gone stale while its model answered (the owner edited the replaced note meanwhile): the replace and the remove are dropped together, and the same answer's add still goes in — into the vault", async () => {
+    judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
+    const w = await owned("mvq");
+    await setNewNotes(db, w.owner.id, "open");
+    const open = await openAuto(w.owner, w.agent.id, "周末去爬山");
+    await seeded(w.owner, w.agent.id, "和小林一起去", true);
+    await say(w.owner, w.conv, "这两条合成一条，重复的那条删掉，七点出发");
+    gateway.reply("好的。");
+    const held = gateway.hang();
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    // The review has read the notes and asked its model; the owner edits the note it is to replace before it answers.
+    await held.reached;
+    expect((await api(app, w.owner, "PATCH", `/api/memory/notes/${open.id}`, { text: "周末去露营" })).status).toBe(200);
+    held.release(ops({ op: "replace", ref: "n1", text: "周末和小林去爬山" }, { op: "remove", ref: "n2" }, add("七点出发")));
+    await memory().idle();
+    expect(reviewCalls()).toHaveLength(1);
+    expect((await ownerRows(w.owner.id)).map((n: { text: string; vault: boolean }) => [n.text, n.vault])).toEqual([
+      ["周末去露营", false],
+      ["和小林一起去", true],
+      ["七点出发", true],
+    ]);
+  });
+
   it("a correction next to the forget of a note in the vault fails closed: the corrected note goes into the vault (which text took what cannot be told)", async () => {
     judge.answer(() => ({ sort: 0.95, explicit_forget: 0.95 }));
     const w = await owned("mvc");
