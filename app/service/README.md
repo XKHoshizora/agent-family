@@ -393,7 +393,7 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 
 Everything else is not rate limited.
 
-**Metrics in the log.** The service writes six kinds of line at `info`, each a JSON log object with a `metric` field,
+**Metrics in the log.** The service writes seven kinds of line at `info`, each a JSON log object with a `metric` field,
 for an operator to tune the numbers above (and the site's models) from (nothing else about them is recorded or exposed):
 
 - `{ "metric": "run_wait_ms", "lane", "ms" }`, once for each reply the worker claims (its first claim; not again when it is
@@ -414,6 +414,9 @@ for an operator to tune the numbers above (and the site's models) from (nothing 
   "reminder_no_agent" }` once for each reminder that found its owner with no Agent at all to be told in.
 - `{ "metric": "run_held_back" }`, once each time a reply is held back at its admission (Metering, Money that does not
   block): how often replies wait for one another's holds — each time, its next claim reads its conversation again.
+- `{ "metric": "elsewhere_skipped", "runId" }`, once for each "not here, but elsewhere" lookup skipped because as many as
+  may run at once (2) already did (Whispers, `found_elsewhere`): how often an owner gets no whisper for that reason alone
+  (nothing of what was asked is logged).
 
 Proactive replies write four more (`proactive_skipped`, `judge_failed`, `judge_partial`, `judge_daily_limit`): Proactive
 replies, Log.
@@ -1446,7 +1449,7 @@ this group, as the Agent sees it, and there only what you can read now: a conver
 message after your joining; its own conversation with you included, `我们的专属会话`: you see each hit before you answer),
 found something. The caps below are read before that query (none runs without room for a whisper), and at most 2 such
 queries run at once in the whole service (`ELSEWHERE_AT_ONCE`, apart from the search slots, which are the models'): one
-more is skipped.
+more is skipped, and counted (`elsewhere_skipped`, Metrics in the log).
 `群里有人问到的事，这个群里没有，但我在别处查到了。要告诉他们吗？`, buttons `tell` and `dismiss`, `detail` `{"hits": [{"where", "who",
 "when", "text"}]}` — at most 5, the newest first: `where` the group's title (without citations; `某个群` without one) or `我们的专属会话`, `who`
 the sender's name as a label shows it, `when` `YYYY-MM-DD HH:mm` in the site's time zone, `text` on one line around the
@@ -1463,8 +1466,13 @@ stay in the whisper, for you), and no `@` that would call anyone in a text. It i
 own words (`TOLD_NO_TOOLS`: no tools, nothing more to look up, what it tells was looked up before) instead of `NO_TOOLS`;
 it posts in the group as any reply (a `found_elsewhere` whisper that holds no hits queues nothing). What it is shown of
 the hits lies outside every late-joiner line of this group — none of its members could see those messages: that is
-acceptable only because it is your own, deliberate telling of what you can read; nothing else crosses. A retry of a told
-reply that failed keeps its whisper, and tells again. It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
+acceptable only because it is your own, deliberate telling of what you can read; nothing else crosses. The words
+themselves are told: a hit's own text can name its group or its speaker (an Agent's earlier reply, `mia 在乙群说…`), and
+nothing can take that out of prose — only `不要说是在哪里看到的，也不要说是谁说的。` asks the model not to repeat it (a limit, to
+check with a live model). A told reply takes on no call: a member's call while it is queued or running is noted on it
+(`pending_seq`), never folded in, and it is shown the group only up to what it covers; its follow-up then answers that
+call as an ordinary reply — with tools, in the caller's lane. A retry of a told reply that failed keeps its whisper, and
+tells again (what it covers, not what was noted on it). It is held to what a retry of yours is: 409 `agent_paused`, 400 `invalid_request` (no model), 409
 `busy_run` (a reply of it queued or running there), 429 `rate_limited` (your own replies a minute) — each leaves the
 whisper open, to answer again. `不用` (decline) does nothing more. Vault notes are not involved: hits are messages.
 `tools_off` — a reply found its provider model unable to use tools and the model was marked so

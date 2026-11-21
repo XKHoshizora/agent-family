@@ -1066,7 +1066,6 @@ export function setMemoryChangeStatus(state, conversationId, changeId, status) {
 const WHISPER_STATUSES = new Set(["open", "accepted", "declined", "expired"]);
 const WHISPER_ACTIONS = new Set(["tell", "dismiss"]);
 
-/** A whisper as the service sends it (README "Whispers"), only the fields shown; null when it is not one. */
 /** At most this many hits of a `found_elsewhere` whisper are kept (the service sends at most 5). */
 const WHISPER_HITS_MAX = 5;
 const HIT_KEYS = ["where", "who", "when", "text"];
@@ -1084,6 +1083,7 @@ function hitsOf(w) {
     .map(({ where, who, when, text }) => ({ where, who, when, text }));
 }
 
+/** A whisper as the service sends it (README "Whispers"), only the fields shown; null when it is not one. */
 function whisperOf(w) {
   if (!w || typeof w !== "object" || typeof w.id !== "string" || typeof w.conversationId !== "string") return null;
   if (!Number.isSafeInteger(w.afterSeq) || w.afterSeq < 0 || typeof w.text !== "string" || !WHISPER_STATUSES.has(w.status)) return null;

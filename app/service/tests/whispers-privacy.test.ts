@@ -209,6 +209,8 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
     expect((await api(app, w.owner, "POST", `/api/conversations/${w.g}/members`, { principalId: lee.id })).status).toBe(201);
     await leeSocket.waitFor((e) => e.type === "conversation" && e.id === w.g);
     const joined = leeSocket.events.length;
+    // And a socket of lee's opened after the join (a reconnect): both shapes.
+    const laterSocket = await connect(app, lee);
     const first = await reads(w, lee, a.id);
     const b = await whisper(w);
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id);
@@ -216,8 +218,17 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === b.id && e.whisper.status === "accepted");
     // Byte for byte what they read before the second one (its id answered as the first's was: as an id that is none).
     expect(await reads(w, lee, b.id)).toEqual(first);
-    expect(leeSocket.events.slice(joined)).toEqual([]);
-    expect(leeSocket.events.some((e) => e.type === "whisper")).toBe(false);
+    // Settled on a message frame both sockets get after everything above (each socket's pushes keep their order).
+    const last = await say(w.mia, w.g, "收尾");
+    for (const s of [leeSocket, laterSocket]) await s.waitFor((e) => e.type === "message" && e.message.seq === last);
+    const settledOn = (e: { type: string; message?: { seq: number } }) => e.type === "message" && e.message?.seq === last;
+    expect(leeSocket.events.slice(joined).filter((e) => !settledOn(e as never))).toEqual([]);
+    expect(laterSocket.events.filter((e) => !settledOn(e as never))).toEqual([]);
+    for (const s of [leeSocket, laterSocket]) expect(s.events.some((e) => e.type === "whisper")).toBe(false);
+    nothingOf(
+      [...leeSocket.events, ...laterSocket.events].map((e, i): [string, unknown] => [`frame ${i}`, e]),
+      [a.id, b.id],
+    );
     nothingOf(
       first.map(([label, , body]) => [label, body]),
       [a.id, b.id],

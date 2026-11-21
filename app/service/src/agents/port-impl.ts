@@ -608,10 +608,11 @@ export class DbAgentPort implements AgentPort {
       const ratio = await readRatio(t, key);
       const planned = planRatio(ratio);
 
-      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back).
+      // What it covered before taking on what was noted on it since its claim (kept: step 3 may hand that back). A told
+      // reply takes on nothing noted on it: that stays noted, for its follow-up to answer as an ordinary reply.
       const coveredBefore = Number(state.covers_seq ?? 0);
-      const covers = Math.max(coveredBefore, Number(state.pending_seq ?? 0));
-      await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
+      const covers = told !== null ? coveredBefore : Math.max(coveredBefore, Number(state.pending_seq ?? 0));
+      if (told === null) await t.query("update agent_runs set covers_seq = $2, pending_seq = null where id = $1", [run.id, covers]);
       const owner = await t.query<{ display_name: string }>("select display_name from principals where id = $1", [agent.ownerId]);
       const displayName = owner.rows[0]!.display_name;
       // What its Agent may be shown of its memory here (`notesFor`'s rules), read once with the rest, under the same locks.
@@ -648,12 +649,22 @@ export class DbAgentPort implements AgentPort {
       // here, for the whole run. First, whoever it will hear from beyond what it was asked — everyone who wrote since
       // what it covered before taking on what was noted above, those calls included — is recorded among its askers
       // (runs.ts `hearFrom`, fix round 2), so the line counts them, and so does whatever it hands down.
-      if (group) await hearFrom(t, run.id, coveredBefore, null);
+      // (A told reply hears nobody beyond what it covers: it is shown nothing later, `upTo` below.)
+      if (group && told === null) await hearFrom(t, run.id, coveredBefore, null);
       const line = group ? await askerLine(t, run.id) : 0;
       const calls = group ? await callsSeen(t, agent.id, run.id, line) : [];
       if (group && calls.length === 0 && told === null) return { end: NOTHING_LEFT };
       const cap = group ? { maxTokens: config.agentGroupContextTokens, maxMessages: GROUP_CONTEXT_MESSAGES, after: line, calls } : null;
-      const plan = { agentId: agent.id, ownerId: agent.ownerId, conversationId: run.conversationId, coversSeq: covers, group: cap, planRatio: planned };
+      const plan = {
+        agentId: agent.id,
+        ownerId: agent.ownerId,
+        conversationId: run.conversationId,
+        coversSeq: covers,
+        group: cap,
+        planRatio: planned,
+        // A told reply is shown the group up to what it covers: a call noted on it since is its follow-up's.
+        ...(told !== null ? { upTo: covers } : {}),
+      };
       // The tools the reply is offered, decided in this order: none for a reply `告诉他们` queued (`told`); none while
       // `TOOLS.enabled` is false; none for a model that
       // cannot use them (`Resolved.tools`: its configuration, or its owner's list); none without a toolbox, or when it

@@ -731,8 +731,10 @@ interface Call {
  * an Agent's message the owner is behind, `behindAgentMessage`), else keeps its caller and lane — so a member's call
  * relayed through one of the owner's Agents does not make it the owner's — unless nobody had called for it (lane
  * `proactive`): then it is this call's, in its lane (`takesOnCall`); a running one notes it (`pending_seq`), and
- * stays as it is: its follow-up answers what was noted, in a lane of its own (`followUp`). Either takes on the call's
- * askers (`withAskers`) and the call (`call_seqs`), and everyone who wrote since what it covers, up to the call
+ * stays as it is: its follow-up answers what was noted, in a lane of its own (`followUp`). A told reply (`whisper_id`:
+ * 告诉他们 queued it, Task 8), queued or running, takes on no call: it only notes it, as a running reply does, and takes
+ * on nothing else of it — its follow-up answers the call as an ordinary reply, with tools, in the caller's lane. Any
+ * other takes on the call's askers (`withAskers`) and the call (`call_seqs`), and everyone who wrote since what it covers, up to the call
  * (`heardIn`: a queued one now covers that stretch; a running one takes it on in `begin`, or hands it down): a running
  * one may take on what was noted before its `begin` reads what it is shown, and what it relays carries its askers on
  * (`triggerFromAgent`). A mention folded so is never
@@ -758,11 +760,13 @@ async function reachAgents(
   for (const { agent, by, askers } of calls) {
     const folded = await t.query(
       `update agent_runs
-          set covers_seq = case when status = 'queued' then greatest(covers_seq, $3) else covers_seq end,
-              pending_seq = case when status = 'running' then greatest(pending_seq, $3) else pending_seq end,
-              ${takesOnCall("status = 'queued'", "$4", "$5", "$6")},
-              asker_ids = ${withAskers("$7", heardIn("$2::uuid", "agent_runs.covers_seq", "$3::bigint"))},
-              call_seqs = array(select distinct s from unnest(coalesce(call_seqs, array[covers_seq]) || $3::bigint) as x (s) order by s)
+          set covers_seq = case when status = 'queued' and whisper_id is null then greatest(covers_seq, $3) else covers_seq end,
+              pending_seq = case when status = 'running' or whisper_id is not null then greatest(pending_seq, $3) else pending_seq end,
+              ${takesOnCall("status = 'queued' and whisper_id is null", "$4", "$5", "$6")},
+              asker_ids = case when whisper_id is null then ${withAskers("$7", heardIn("$2::uuid", "agent_runs.covers_seq", "$3::bigint"))} else asker_ids end,
+              call_seqs = case when whisper_id is null
+                               then array(select distinct s from unnest(coalesce(call_seqs, array[covers_seq]) || $3::bigint) as x (s) order by s)
+                               else call_seqs end
         where agent_id = $1 and conversation_id = $2 and status in ('queued', 'running')`,
       [agent.id, conversationId, seq, triggeredBy, by.lane, by.id, askersParam(askers)],
     );
@@ -1546,7 +1550,8 @@ async function retryInGroup(
   }
   if (!(await modelUsable(t, config, agent))) throw new AppError(409, "model_gone");
   if (await overLaneLimit(t, ownerId, "own", config)) throw new AppError(429, "rate_limited");
-  const queued = await queueRun(t, agent, conversationId, Number(latest.answers), latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
+  const covering = latest.whisper_id !== null ? Number(latest.covers) : Number(latest.answers);
+  const queued = await queueRun(t, agent, conversationId, covering, latest.triggered_by, callerOf(ownerId, ownerId), latest.asker_ids);
   await answersCalls(t, queued.run.id, (latest.calls ?? [latest.covers]).map(Number));
   // A told reply (`告诉他们`, Task 8) is told again: the retry keeps its whisper, so it is shown the hits and offered no tools.
   if (latest.whisper_id !== null) await t.query("update agent_runs set whisper_id = $2 where id = $1", [queued.run.id, latest.whisper_id]);

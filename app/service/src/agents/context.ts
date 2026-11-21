@@ -110,6 +110,8 @@ export interface ContextRun {
    * label carries — the message's own and a quoted one's alike. Absent: labels carry none.
    */
   fileRef?: (attachmentId: string) => string;
+  /** Nothing after this seq is shown (a told reply: what was noted on it since is its follow-up's). Absent: no bound. */
+  upTo?: number;
 }
 
 /** What `loadContext` read: everything `buildContext` needs but the attachments' bytes. */
@@ -400,9 +402,10 @@ async function loadPage(
         and m.kind in ('text', 'file') and (m.body -> 'fixed') is distinct from 'true'::jsonb
         and ((m.seq > $3 and coalesce(r.covers_seq, m.seq) > $3) or m.seq = any($9::bigint[]))
         and (m.sender_id = $6 or ($8::boolean and m.sender_id <> $1) or coalesce(r.covers_seq, m.seq) <= $5)
+        and ($10::bigint is null or m.seq <= $10::bigint)
       order by m.seq desc
       limit $7`,
-    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, limit, group, run.group?.calls ?? []],
+    [run.agentId, run.conversationId, from, before, run.coversSeq, run.ownerId, limit, group, run.group?.calls ?? [], run.upTo ?? null],
   );
   const quotedSeqs = [...new Set(rows.flatMap((r) => (typeof r.reply_to === "number" && Number.isSafeInteger(r.reply_to) ? [r.reply_to] : [])))];
   const quotes = new Map<number, string>();

@@ -246,15 +246,20 @@ describe("a search in a group that finds nothing there", () => {
         },
       });
     const gated = { pool: real.pool, query: slow(real).query, tx: (fn: any) => real.tx((client) => fn(slow(client))), close: () => real.close() } as Db;
-    const hook = createElsewhere(elsewhereDeps({ db: gated }), { atOnce: 1 });
+    const counted: unknown[] = [];
+    const log = { warn: app.log.warn.bind(app.log), error: app.log.error.bind(app.log), info: (obj: unknown) => void counted.push(obj) } as ElsewhereDeps["log"];
+    const hook = createElsewhere(elsewhereDeps({ db: gated, log }), { atOnce: 1 });
     const run = (await db.query<{ id: string }>("insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, triggered_by, lane) values ('reply', $1, $2, $3, 'done', 1, 'human', 'own') returning id", [w.g, w.agent.id, w.owner.id])).rows[0]!.id;
     const scope = { id: run, agentId: w.agent.id, ownerId: w.owner.id, conversationId: w.g, group: true, refs: new RunRefs(), heardTo: 1, mark: null };
     const first = hook(scope, { term: "蓝鲸计划", from: null, before: null, after: null });
     await reachedP;
     await hook(scope, { term: "口令是七七", from: null, before: null, after: null });
-    expect(sql.filter((s) => /ilike/i.test(s))).toHaveLength(1);
+    const searched = sql.filter((s) => /ilike/i.test(s)).length;
     release();
     await first;
+    expect(searched).toBe(1);
+    // Counted (a counter only: no words, nothing found).
+    expect(counted).toEqual([{ metric: "elsewhere_skipped", runId: run }]);
     await hook.idle();
     expect(await whispersOf(w.owner.id, w.g)).toHaveLength(1);
   });
@@ -393,6 +398,44 @@ describe("告诉他们", () => {
     expect([bare.status, bare.json.error]).toEqual([400, "invalid_request"]);
     expect((await whispersOf(w.owner.id, w.g))[0]!.status).toBe("open");
     expect(await told()).toEqual([]);
+  });
+
+  it("a member's call while a told reply is queued is not folded into it: the told reply tells, then an ordinary reply, with tools, answers the member — nothing lost, nothing answered twice", async () => {
+    const { w, whisper } = await whispered();
+    expect((await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`)).status).toBe(200);
+    const told = (await runsOf(w.agent.id, w.g)).find((r) => r.whisper_id !== null)!;
+    const before = (await db.query<{ covers: string; calls: string[] | null }>("select covers_seq::text as covers, call_seqs::text[] as calls from agent_runs where id = $1", [told.id])).rows[0]!;
+    const call = await say(w.ned, w.g, "@olive_bot 另外，周五几点开会？");
+    // Noted on the told reply for its follow-up, not taken on by it.
+    const after = (await db.query<{ covers: string; pending: string | null; calls: string[] | null; lane: string; caller_id: string | null }>(
+      "select covers_seq::text as covers, pending_seq::text as pending, call_seqs::text[] as calls, lane, caller_id from agent_runs where id = $1",
+      [told.id],
+    )).rows[0]!;
+    expect(after).toEqual({ covers: before.covers, pending: String(call), calls: before.calls, lane: "own", caller_id: w.owner.id });
+    expect((await runsOf(w.agent.id, w.g)).filter((r) => r.status === "queued")).toHaveLength(1);
+    // The told reply: shown nothing of the member's question.
+    gateway.reply("蓝鲸计划在三楼。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const toldCall = gateway.calls.at(-1)!;
+    expect(toldCall.system).toContain(TELL_THEM);
+    expect(JSON.stringify(toldCall.messages)).not.toContain("周五几点开会");
+    expect(JSON.stringify(toldCall.messages.at(-1))).toContain("上次说的那个计划在哪");
+    // Then its follow-up: an ordinary reply, in the member's lane, offered tools, answering the member's call.
+    const follow = (await db.query<{ whisper_id: string | null; lane: string; caller_id: string | null; calls: string[] }>(
+      "select whisper_id, lane, caller_id, call_seqs::text[] as calls from agent_runs where agent_id = $1 and conversation_id = $2 and status = 'queued'",
+      [w.agent.id, w.g],
+    )).rows;
+    expect(follow).toEqual([{ whisper_id: null, lane: "others", caller_id: w.ned.id, calls: [String(call)] }]);
+    gateway.callTools([{ name: SEARCH_MESSAGES, input: { query: "周五几点" } }]).reply("周五下午三点。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    const followCall = gateway.calls.at(-1)!;
+    expect((followCall.tools ?? []).length).toBeGreaterThan(0);
+    expect(followCall.system).not.toContain(TELL_THEM);
+    expect(JSON.stringify(followCall.messages)).toContain("周五几点开会");
+    // Each posted once.
+    const said = (await api(app, w.mia, "GET", `/api/conversations/${w.g}/messages`)).json.messages.filter((m: any) => m.senderId === w.agent.id).map((m: any) => m.text);
+    expect(said.slice(-2)).toEqual(["蓝鲸计划在三楼。", "周五下午三点。"]);
+    expect(said.filter((t: string) => t === "蓝鲸计划在三楼。")).toHaveLength(1);
   });
 
   it("不用: nothing happens", async () => {

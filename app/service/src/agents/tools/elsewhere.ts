@@ -59,7 +59,7 @@ export interface ElsewhereDeps {
   db: Db;
   config: Pick<Config, "siteTimezone" | "searchStatementTimeoutMs">;
   realtime: Pick<Hub, "pushWhisper">;
-  log: Pick<FastifyBaseLogger, "warn" | "error">;
+  log: Pick<FastifyBaseLogger, "warn" | "error" | "info">;
 }
 
 /** The hook, and what tests wait on: every lookup it has started, settled. */
@@ -67,12 +67,17 @@ export type ElsewhereHook = ((scope: RunScope, ask: ElsewhereAsk) => Promise<voi
 
 /**
  * The hook (`ToolDeps.elsewhere`). At most `atOnce` lookups at a time (default `ELSEWHERE_AT_ONCE`; a bound of its own,
- * apart from the search slots, which are the model's): one more while they run is skipped — nobody is told either way.
+ * apart from the search slots, which are the model's): one more while they run is skipped — nobody is told either way;
+ * it is counted (`elsewhere_skipped`, one log line, nothing of what was asked).
  */
 export function createElsewhere(deps: ElsewhereDeps, { atOnce = ELSEWHERE_AT_ONCE }: { atOnce?: number } = {}): ElsewhereHook {
   const running = new Set<Promise<void>>();
   const hook = (scope: RunScope, ask: ElsewhereAsk): Promise<void> => {
-    if (running.size >= atOnce) return Promise.resolve();
+    if (running.size >= atOnce) {
+      // One counter line (no words, nothing found): how often the bound holds a lookup back.
+      deps.log.info({ metric: "elsewhere_skipped", runId: scope.id }, "found elsewhere: a lookup was skipped, as many as may run at once already were");
+      return Promise.resolve();
+    }
     const done = lookFor(deps, scope, ask).catch((err: unknown) =>
       deps.log.warn({ runId: scope.id, kind: (err as { name?: unknown } | null)?.name ?? typeof err }, "found elsewhere: the lookup failed"),
     );
