@@ -2001,7 +2001,7 @@ describe("Agents in a group (batch 2C)", () => {
     const { transport } = await openGroup([wire(G1, 1, ANN, "@annbot 查一下")]);
     await push(transport, { type: "message", message: wire(G1, 2, OAG, "我问问 @helper 。", { ack: true }) });
     expect(haltButton()).toBeNull();
-    await push(transport, { type: "message", message: wire(G1, 3, OAG, "@helper 你看看") });
+    await push(transport, { type: "message", message: wire(G1, 3, OAG, "@helper 你看看", { mentions: [{ id: AG1, start: 0, length: 7 }] }) });
     expect(haltButton()).toBeTruthy();
   });
 
