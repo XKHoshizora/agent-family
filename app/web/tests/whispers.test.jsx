@@ -169,6 +169,13 @@ describe("a whisper in the conversation", () => {
     expect(whisperLi("w2").textContent).toBe("已告诉他们");
   });
 
+  it("only a found_elsewhere whisper shows hits: another kind carrying them shows its text alone", async () => {
+    const hits = [{ where: "乙群", who: "小安", when: "2026-11-19 09:30", text: "不该出现的内容" }];
+    await openGroup({ whispers: [whisper("w1", G1, 2, { kind: "memory", detail: { hits } })] });
+    expect(whisperLi("w1").querySelector(".whisper-hit")).toBeNull();
+    expect(whisperLi("w1").textContent).not.toContain("不该出现的内容");
+  });
+
   it("a refusal that is not stale keeps the buttons and says why: busy_run, paused, no model, too fast", async () => {
     const cases = [
       [409, "busy_run", "它正在回复，说完再点。"],
