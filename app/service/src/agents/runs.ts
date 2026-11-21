@@ -1254,6 +1254,7 @@ export async function followUp(
   pending: number,
   callSeqs: readonly (number | string)[] | null,
   config: RunLimits,
+  toldReply = false,
 ): Promise<FollowUp> {
   const owners = callerOf(agent.ownerId, agent.ownerId);
   if (conversationId === agent.conversationId) return followUpOf(await queueRun(t, agent, conversationId, pending, "human", owners, [agent.ownerId]));
@@ -1277,7 +1278,19 @@ export async function followUp(
   );
   // The calls the run noted (`callSeqs`, its `call_seqs`: each recorded as it was accepted when it was sent), never read
   // again from the text, which a rename or a member joining or leaving since would read otherwise (fix round 1, I1).
-  const noted = new Set((callSeqs ?? []).map(Number));
+  // (A told reply (`告诉他们`) took on no call, so none is in its `call_seqs`: what was noted on it since its claim, between what
+  // it covers and `pending`, is read from the messages' stored mentions — those that name this Agent — as the sender stored them.)
+  const noted = new Set(
+    toldReply
+      ? (
+          await t.query<{ seq: string }>(
+            `select m.seq::text as seq from messages m
+              where m.conversation_id = $1 and m.seq > $2 and m.seq <= $3 and m.mentions @> jsonb_build_array(jsonb_build_object('id', $4::text))`,
+            [conversationId, covers, pending, agent.id],
+          )
+        ).rows.map((r) => Number(r.seq))
+      : (callSeqs ?? []).map(Number),
+  );
   // An Agent's message calls no Agent only its owner may call (`triggerFromAgent`).
   const calls = rows.filter(
     (r) => (agent.groupMentions === "members" || (r.kind === "human" && r.sender_id === agent.ownerId)) && noted.has(Number(r.seq)),

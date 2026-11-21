@@ -506,9 +506,11 @@ describe("a reply that has started is never refused for money", () => {
     const run = await runIn(a.conv);
     expect(run).toMatchObject({ status: "done", hold: "0" });
     const replies = (await api(app, owner, "GET", `/api/conversations/${a.conv}/messages`)).json.messages.filter((m: { senderId: string }) => m.senderId === a.id);
-    expect(replies).toHaveLength(1);
-    expect(replies[0].text).toContain("就这样。");
-    expect(replies[0].truncated ?? false).toBe(false);
+    // What it wrote before its tool call was its acknowledgement, posted then; the answer follows it, whole.
+    expect(replies).toHaveLength(2);
+    expect(replies[0]).toMatchObject({ text: "我先查一下。", ack: true });
+    expect(replies[1].text).toContain("就这样。");
+    expect(replies[1].truncated ?? false).toBe(false);
     const cost = 1000n * 100n + 500n * 1000n + 2000n * 100n + 300n * 1000n;
     expect(await recordOf(run.id)).toEqual([{ cost: cost.toString(), balance: cost.toString(), free: "0", forgiven: "0" }]);
     expect(cost).toBeLessThanOrEqual(BigInt(app.deps.config.tools.maxPoints) * POINT);

@@ -222,8 +222,10 @@ interface RunState {
   marked: boolean;
   /** Its owner asked it to stop while it ran (runs.ts `stopRun`). */
   stop_asked: boolean;
+  /** A reply `告诉他们` queued (`whisper_id`): it takes on no call, so its follow-up finds what was noted on it from the messages' stored mentions (runs.ts `followUp`). */
+  told: boolean;
 }
-const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane, call_seqs::text[] as call_seqs, held_back_by is not null as marked, stop_asked";
+const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane, call_seqs::text[] as call_seqs, held_back_by is not null as marked, stop_asked, whisper_id is not null as told";
 
 /**
  * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
@@ -1166,7 +1168,7 @@ export class DbAgentPort implements AgentPort {
         followed:
           next === null
             ? followUpOf(null)
-            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config),
+            : await followUp(t, agent, run.conversationId, Number(state.rows[0].covers_seq ?? 0), next, state.rows[0].call_seqs, config, state.rows[0].told),
         interrupted: state.rows[0].interrupted !== null,
         reply: reply ? Number(reply.seq) : null,
         reminder,
@@ -1318,7 +1320,7 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
   const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
   const { run: followed, ...told } =
-    next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config);
+    next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config, state.told);
   return {
     runs: followed ? [ended, followed] : [ended],
     told,
