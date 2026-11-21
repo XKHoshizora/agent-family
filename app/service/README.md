@@ -407,7 +407,8 @@ for an operator to tune the numbers above (and the site's models) from (nothing 
   reply): the site model's configuration is the operator's, so nothing else is done — such a model may want `tools: false`
   in `SITE_MODELS`.
 - `{ "metric": "allowance_warn_80" }`, `{ "metric": "allowance_empty" }`, `{ "metric": "balance_empty" }`, once for each
-  reminder an owner is sent (Metering, Reminders), nothing else with them: how often owners run low.
+  reminder an owner is sent (Metering, Reminders), nothing else with them: how often owners run low; `{ "metric":
+  "reminder_no_agent" }` once for each reminder that found its owner with no Agent at all to be told in.
 - `{ "metric": "run_held_back" }`, once each time a reply is held back at its admission (Metering, Money that does not
   block): how often replies wait for one another's holds — each time, its next claim reads its conversation again.
 
@@ -3455,23 +3456,41 @@ constants, 400 what providers add around tool definitions, and `G` the most one 
 unit holds count in (a token a byte): `k` results — the calls one reply may run in all, the offered tools' per-reply caps
 summed (`TOOLS.searchPerReply` + `TOOLS.filePerReply` = 10 by default; a tool offered with no cap of its own makes the
 room the whole call) —, each at most 3 × `resultMaxWeight` bytes (a result's weight is ⌈bytes / 3⌉, and results are cut by
-weight) and 200 of framing; the round's own assistant turn and the notes answering calls not run, taken as at most 6
-bytes an output token; and 300. Never more than one whole call of the model, and never less than the last call can cost:
-that call's input is at most the input of the call before it and what that call's round added. *Worked example* (the
-acceptance's free model, Luna: 70 micro-points an input token, 350 an output token, `M` 4 096, `C` 200 000; a fresh
-conversation whose first call's input bound is 6 000; `k` 10): `G` = 10 × 9 200 + 24 576 + 300 = 116 876; the room is
-122 876 × 70 + 4 096 × 350 = 10.03 points; the first call's most 6 000 × 70 + 4 096 × 350 = 1.85; the reply holds 11.89
-(the whole context's room would make it 17.03). At half of a 100-point day, 50 left, four such replies start at once (4 ×
-11.89 = 47.6 ≤ 50; `AGENT_MAX_CONCURRENT_RUNS` is 4), against two with the whole context's room; an ordinary one-search
-reply keeps its rounds: its search reported 2 500 in and 300 out (0.28) and brought back 3 000 bytes, so its next call's
-input bound is about 9 500, its most 2.10, the room renewed 10.28, and the hold goes to 0.28 + 2.10 + 10.28 = 12.66 — two
-such replies open hold 25.3 of the 50. Below 23.8 left a second waits for the first; below 11.89 a reply starts only
-alone. *The forgiven overrun* per owner and site day is still at most one reply plus one call per open persona draft: a
-reply that starts beside others fits beside their holds, and every round of it renews its room only while it fits (else
-its next call is the last, made within the room it kept), so only the reply that starts alone can pass what is left — by
-at most its hold less what was left (11.89 − L on Luna above; its real cost, typically under 1 point; at worst, a first
-call on a whole context, 2 × 15.17), the one assumption being the 6 bytes an output token (a turn beyond it is forgiven,
-as an image counted above its constant is). *Worked example (the balance):* a balance of 3 points,
+weight) and 200 of framing; the round's own assistant turn and the notes answering calls not run, allowed 6 bytes an
+output token; and 300. Never more than one whole call of the model. *What it bounds, and what it does not:* the last
+call's input is at most the input of the call before it and what that call's round added, so the room covers the last
+call whenever a round adds at most `G`. It does in real tokens; but `G` counts a round in bytes, as holds do, and a round
+can pass it in bytes without passing it in tokens — calls past their caps, repeats and garbled calls, each answered by a
+note (≈ 200–250 bytes for ≈ 8–12 output tokens, and not limited in number within a round); the provider's ids,
+signatures and encrypted reasoning carried in the turn; a result cut to a string and escaped again; long tokens (a run of
+spaces, a JSON escape). Then the last call's hold grows past the room and is raised past what is left, as on the balance
+(Extension) — on Luna (below) by 0.57 points for a round of 8 bytes an output token, 1.72 for 12, and up to 5.1 on a fresh
+conversation for a round spent on ≈ 500 tiny calls past their caps (≈ 107 000 bytes; at most what the context leaves) —,
+which only makes the owner's other replies wait the longer. What is charged is real tokens (re-sending a turn costs about
+its output tokens, whatever its bytes; results run 0.3–0.5 tokens a byte), so the real last call stays inside the room
+unless results made to count near a token a byte, hundreds of note-answered calls in one round and a context far from
+full all come together: the worst constructed in review passes it by ≈ 4 000 tokens, ≈ 0.3 points on Luna, forgiven. *Worked
+example* (the acceptance's free model, Luna: 70 micro-points an input token, 350 an output token, `M` 4 096, `C`
+200 000; a fresh conversation whose first call's input bound is 6 000; `k` 10): `G` = 10 × 9 200 + 24 576 + 300 =
+116 876; the room is 122 876 × 70 + 4 096 × 350 = 10.03 points; the first call's most 6 000 × 70 + 4 096 × 350 = 1.85;
+the reply holds 11.89 (the whole context's room would make it 17.03). At half of a 100-point day, 50 left, four such
+replies start at once (4 × 11.89 = 47.6 ≤ 50; `AGENT_MAX_CONCURRENT_RUNS` is 4), against two with the whole context's
+room. An ordinary one-search reply: its search reported 2 500 in and 300 out (0.28) and brought back 3 000 bytes, so its
+next call's input bound is about 9 500, its most 2.10, the room renewed 10.28, and the hold goes to 0.28 + 2.10 + 10.28 =
+12.66 — two such replies open hold 25.3 of the 50 and both keep their rounds; of four open, three can renew (3 × 12.66 +
+11.89 = 49.87) and the fourth's next call is its last (it would need 12.66 with 12.02 left) — nothing lost for a
+one-search reply, whose next call is its answer, but one that wanted a second search makes do with one. Below 23.8 left a
+second reply waits for the first; below 11.89 a reply starts only alone. *Each further tool offered with a cap of its own*
+adds that cap to `k`, and every result it may bring back is counted whole: with a clock (`current_time`, 1 a reply, its
+answer some 50 bytes) `k` is 11 — `G` 126 076, the room 10.68, the hold 12.53; at 50 left three start at once (4 × 12.53 =
+50.1 > 50), and a second waits below 25.1. *The forgiven overrun* per owner and site day is still at most one reply plus
+one call per open persona draft: a reply that starts beside others fits beside their holds, and every round of it renews
+its room only while it fits (else its next call is the last, made within the room it kept), so only the reply that starts
+alone can pass what is left — by at most its hold less what was left (11.89 − L on Luna above; at worst, a first call on
+a whole context, 15.17 + 15.17 − L; realistically its real cost less L, ≈ 0.84 for one search) —, plus one call for each
+draft open beside it (on Luna ≤ 1.64 each with a 3 000-byte prompt, realistically ≈ 0.1), plus the bytes-not-tokens
+excess above (≲ 0.3 points for each reply open beside it; practically none): on Luna ≤ ≈ 16.8 points in all on a fresh
+conversation (≈ 35 with a whole-context first call), realistically under 1 point. *Worked example (the balance):* a balance of 3 points,
 two Agents of yours called at once on a model whose calls hold 5 each. The first starts (3 is above zero, and it is the
 only call holding against the balance). The second would make the holds 10 against 3: it waits, queued. The first costs
 4: the balance is −1, and the second, claimed again, is refused (`no_quota`) — nothing is left. Had the first cost 1, the
@@ -3498,7 +3517,7 @@ call at most; else, while so far and the next call's most stay within `TOOLS.max
 allowance with the room for a last call after it besides, renewed from the next call's input bound (Admission, the free
 allowance's room) — the hold becomes that and another round may call tools; else the hold becomes so far and the next
 call's most — past *left* if it must be, even below zero (on the free allowance the room kept covers it, so the hold does
-not grow) — and the next call is the last: short of the renewed room on the free allowance a reply is never cut or
+not grow, unless the round passed `G` in bytes: Admission, the free allowance's room) — and the next call is the last: short of the renewed room on the free allowance a reply is never cut or
 queued, its next call is the last. *So far* is never more than the reply has held for its calls (less, on the free
 allowance, the room kept): every call was held at its most
 before it was made, so an upstream that reports more is wrong, and what it reports above that is never held for —
@@ -3621,7 +3640,8 @@ rule of its own per source:
 `tests/metering-concurrency.test.ts` (twenty replies at once, also with every call costing far more than it held),
 `tests/money-blocking.test.ts` (six tool replies on 3 points of balance, and on the day's 3 free points one at a time with
 at most one reply forgiven; two replies that would each run to `TOOLS.maxPoints` on 6; a round reported at 100 points; the
-free allowance's room at admission and after each round; four Luna one-search replies at once at half of a 100-point day),
+free allowance's room at admission and after each round, and the last call within the renewed room when an upstream
+over-reports; four Luna one-search replies at once at half of a 100-point day),
 `tests/money-drafts.test.ts` (eight drafts at once at the end of the allowance).
 
 **Reminders** (`src/metering/reminders.ts`; `tests/money-reminders.test.ts`). When a reply or a persona draft is
@@ -3630,9 +3650,13 @@ draft, or a reply whose Agent was deleted meanwhile, in the conversation of the 
 — (Whispers: only they ever see it, also when the reply was in a group). The reminder is recorded in the settlement's own
 transaction, under the account lock (so a crash cannot lose it), and its whisper is made once that has committed, in a
 transaction of its own that takes the conversation's row and then the Agent's as every whisper does (none of them is
-taken after the account's, which would deadlock with a message or a run holding them); a reminder recorded but never
-made (the service stopped between the two) is made by the periodic sweep (`MEMORY.changesSweepMs`, hourly; also
-`attachments:sweep`), once, and one of an earlier site day is dropped. It is said: when the day's free allowance is `ALLOWANCE.warnAt` (default 0.8) used,
+taken after the account's, which would deadlock with a message or a run holding them). A whisper that cannot be made in
+that conversation (its Agent deleted that moment) is made in the conversation of the owner's Agent used next most
+recently, and so on; one that can be made in none of them is left for the sweep to try again; an owner with no Agent at
+all by then is told nothing, and that is counted (`reminder_no_agent`). A reminder recorded but never made (the service
+stopped between the two) is made by the periodic sweep (`MEMORY.changesSweepMs`, hourly), once, and one of an earlier
+site day is dropped; with `MEMORY.changesSweepMs` 0 there is no periodic sweep, and only `attachments:sweep` (run by
+hand: deploy/README.md) makes what was left. It is said: when the day's free allowance is `ALLOWANCE.warnAt` (default 0.8) used,
 `这个周期的额度已经用了 80%。` (the share as configured); when it is used up and the balance is at or below zero — no reply
 on a free-tier model starts before the site's midnight —, `额度用完了，11月22日 00:00 恢复。` (the date and time it comes back,
 in `SITE_TIMEZONE`, written as the web writes a date — never "明天": the whisper stays for days; nothing about topping up:
@@ -3643,8 +3667,8 @@ recorded under the account lock settlement holds, `delivered_at` once made; an o
 one is recorded); once the
 allowance is used up, its 80 % is not said after; on the settlement that says it is used up, nothing is said of the
 balance beside it. They follow the state, not the one call: what someone else's spending used is told at the next
-settlement. An owner with no Agent left is told nothing (the next settlement tries again). Counted in the log (Metrics in
-the log), never with an owner, an Agent or an amount.
+settlement. An owner with no Agent left at the settlement has nothing recorded (the next settlement tries again). Counted
+in the log (Metrics in the log), never with an owner, an Agent or an amount.
 
 **Records.** Every call appends one usage record (who, which Agent, which source and model, tokens, whether
 `estimated`, the true cost, and how much of it the allowance, the balance and forgiveness took — the three always add up
