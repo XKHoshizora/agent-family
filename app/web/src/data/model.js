@@ -44,8 +44,10 @@
 // Whispers (悄悄话, app/service/README.md "Whispers"). `whispers[conversationId][whisperId]` is a note only I see, about my
 // Agent there, as the service sent it: never a message (it takes no seq, so nothing here counts it as one — position,
 // unread, lastSeq), shown after the message it follows (`afterSeq`). An open one comes with /api/sync, catch-up, a `whisper`
-// push or the list route; an answered or expired one stays as history (an answer is final: an older copy saying open does
-// not reopen it). A sync's list of open ones replaces the open ones held; a conversation that goes takes its whispers along.
+// push or the list route; an answered or expired one stays as history. Of two copies the one with the higher `revision`
+// (raised at every change of its status) is kept, so an older copy never undoes a change — an older copy saying open never
+// reopens an answered one — while a told reply that posted nothing gives its whisper back, open, as a later copy (the
+// service's round 3). A sync's list of open ones replaces the open ones held; a conversation that goes takes its whispers along.
 
 import { isMemoryLanguage } from "./memoryLanguages.js";
 
@@ -1098,6 +1100,7 @@ function whisperOf(w) {
     actions: Array.isArray(w.actions) ? [...new Set(w.actions.filter((a) => WHISPER_ACTIONS.has(a)))] : [],
     status: w.status,
     createdAt: typeof w.createdAt === "string" ? w.createdAt : null,
+    revision: Number.isSafeInteger(w.revision) ? w.revision : 0,
     ...(hits.length > 0 ? { hits } : {}),
   };
 }
@@ -1113,7 +1116,11 @@ function answeredWhispers(held, kept) {
   return out;
 }
 
-/** `list` put into the held whispers of their conversations (one not held keeps none); an answer is never undone by an older copy. */
+/**
+ * `list` put into the held whispers of their conversations (one not held keeps none). A copy of a lower `revision` than the
+ * one held never replaces it; of the same revision, an answer is never undone by a copy saying open (the order before
+ * revisions were sent).
+ */
 function putWhispers(state, list) {
   if (!Array.isArray(list) || list.length === 0) return state;
   const before = state.whispers ?? {};
@@ -1122,7 +1129,7 @@ function putWhispers(state, list) {
     const w = whisperOf(raw);
     if (!w || !state.conversations[w.conversationId]) continue;
     const held = whispers[w.conversationId]?.[w.id];
-    if (held && held.status !== "open" && w.status === "open") continue;
+    if (held && (w.revision < held.revision || (w.revision === held.revision && held.status !== "open" && w.status === "open"))) continue;
     whispers = { ...whispers, [w.conversationId]: { ...(whispers[w.conversationId] ?? {}), [w.id]: w } };
   }
   return whispers === before ? state : { ...state, whispers };
