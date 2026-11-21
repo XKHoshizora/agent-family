@@ -93,14 +93,18 @@ export function registerPrincipalRoutes(app: FastifyInstance): void {
           if (paidSiteChoice(app.deps.config, memoryModel)) throw new AppError(400, "invalid_request");
           await assertModelChoice(t, me.id, memoryModel, "none", app.deps.config);
         }
+        // Once a year (`changeHandle`); the Agents' full handles follow by themselves (`handleOf`). It locks the person's row
+        // (for update) before anything below takes their account's (the settings): the order a send of theirs keeps — its
+        // message holds their row (the foreign key), then a mention locks their account — so the two never wait for each
+        // other in a circle (final review m-7).
+        const changed = handle !== undefined && (await changeHandle(t, me.id, handle));
         if (name !== undefined) await updateDisplayName(t, me.id, name);
         if (newNotes !== undefined) await setNewNotes(t, me.id, newNotes);
         if (memoryModel !== undefined) await setMemoryModel(t, me.id, memoryModel);
         if (dream !== undefined) await setDream(t, me.id, dream);
         if (memoryLanguage !== undefined) await setMemoryLanguage(t, me.id, memoryLanguage);
-        // Once a year (`changeHandle`); the Agents' full handles follow by themselves (`handleOf`). Their ids are read here,
-        // in the change's own transaction: nothing after it commits may turn it into an error.
-        if (handle === undefined || !(await changeHandle(t, me.id, handle))) return null;
+        // The Agents' ids are read here, in the change's own transaction: nothing after it commits may turn it into an error.
+        if (!changed) return null;
         const agents = await t.query<{ id: string; deleted: boolean }>(
           "select p.id, a.deleted_at is not null as deleted from principals p join agents a on a.principal_id = p.id where p.owner_id = $1 order by p.id",
           [me.id],

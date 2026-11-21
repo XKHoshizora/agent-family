@@ -3,6 +3,7 @@ import { createInvite } from "../src/auth/invites.ts";
 import { api, befriend, group, signUp, type Actor } from "./helpers/actors.ts";
 import { mustCreateAgent, SITE_ENV } from "./helpers/agents.ts";
 import { useApp } from "./helpers/harness.ts";
+import { holdThen, someoneWaits } from "./helpers/locks.ts";
 import { scriptedGateway } from "./helpers/models.ts";
 import { closeAllSockets, connect, type Push } from "./helpers/ws.ts";
 
@@ -178,5 +179,21 @@ describe("PATCH /api/me {handle}", () => {
     expect((await api(app, null, "PATCH", "/api/me", { handle: "xiaolin_9" })).status).toBe(401);
     expect((await rename(xiaolin, "xiaolin_9", { id: bobby.id })).json.handle).toBe("xiaolin_9");
     expect((await api(app, bobby, "GET", "/api/me")).json.handle).toBe("bobby");
+  });
+
+  it("with a memory setting in the same body: the person's row is taken before their account's (the lock order a send keeps) — a send holding the person's row, then asking for the account, waits for nothing it holds; both commit (final review m-7)", async () => {
+    const xiaolin = await signUp(app, "xiaolin");
+    // An account row to update (as a person who has used the site has).
+    await db.query("insert into accounts (principal_id) values ($1) on conflict do nothing", [xiaolin.id]);
+    // A send of theirs: the message's foreign key holds their row (for key share), then a mention asks for their account (lockAccount).
+    const sender = holdThen(db, ["select 1 from principals where id = $1 for key share", [xiaolin.id]], ["select 1 from accounts where principal_id = $1 for update", [xiaolin.id]]);
+    await sender.locked;
+    const renaming = rename(xiaolin, "lin", { dream: false, memoryLanguage: "ja" });
+    // The change waits for the person's row: at its first lock (the order), or — out of order — holding the account.
+    await someoneWaits(db, ["%for update%"]).finally(() => sender.release());
+    await sender.done;
+    expect((await renaming).status).toBe(200);
+    expect((await api(app, xiaolin, "GET", "/api/me")).json.handle).toBe("lin");
+    expect((await db.query("select dream, memory_language from accounts where principal_id = $1", [xiaolin.id])).rows).toEqual([{ dream: false, memory_language: "ja" }]);
   });
 });

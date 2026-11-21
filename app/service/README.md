@@ -2012,7 +2012,9 @@ cannot be opened, the model is off the provider's list or no longer on the site;
   gave it up (one you gave up is yours to take back). The handle you leave is yours for good. Everything that shows
   handles follows at once — yours, and your Agents' full ones (`<handle>.<name part>`) — and is pushed (`principal`, with
   the new `handle`) to whoever can see you or each of your Agents, as an avatar change is; your own clients also get an
-  `agent` push per Agent. A mention by an old handle calls nobody; messages keep their text.
+  `agent` push per Agent. A mention by an old handle calls nobody; messages keep their text. With a memory setting in the
+  same body, your row (`principals`, the handle's) is locked before your account's (the settings), the order a send of
+  yours keeps (its message holds your row, then a mention your account), so the two never wait for each other in a circle.
 - Body: `displayName`, `newNotes` (`"auto"`, `"vault"` or `"open"`: what notes written from now on do about the vault;
   existing notes do not move) and `memoryModel` (`null` clears it; else a model as an Agent's `model` is written, checked as
   Agent creation checks it: a site model that is configured and of the free tier (memory the site pays for runs only on its free
