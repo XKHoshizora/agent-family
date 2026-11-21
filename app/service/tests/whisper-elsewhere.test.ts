@@ -438,6 +438,43 @@ describe("告诉他们", () => {
     expect(said.filter((t: string) => t === "蓝鲸计划在三楼。")).toHaveLength(1);
   });
 
+  /**
+   * The group's latest message is ned's, and ned and the owner have a block between them (`by` blocked `whom`): the told
+   * reply covers that message, yet answers nobody's call — the owner's own tell is never dropped as blocked (final review
+   * I-1), and a member's call noted on it while it waited is still answered by its follow-up.
+   */
+  async function toldPastABlock(blocker: "owner" | "ned"): Promise<void> {
+    const { w, whisper } = await whispered();
+    const [by, whom] = blocker === "owner" ? [w.owner, w.ned] : [w.ned, w.owner];
+    expect((await api(app, by, "PUT", `/api/blocks/${whom.id}`)).status).toBe(200);
+    await say(w.ned, w.g, "我先走了，你们聊");
+    expect((await api(app, w.owner, "POST", `/api/whispers/${whisper.id}/accept`)).status).toBe(200);
+    const told = (await runsOf(w.agent.id, w.g)).find((r) => r.whisper_id !== null)!;
+    const call = await say(w.mia, w.g, "@olive_bot 另外，周五几点开会？");
+    gateway.reply("蓝鲸计划在三楼。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await runsOf(w.agent.id, w.g)).find((r) => r.id === told.id)!.status).toBe("done");
+    const said = async () =>
+      (await api(app, w.mia, "GET", `/api/conversations/${w.g}/messages`)).json.messages.filter((m: any) => m.senderId === w.agent.id).map((m: any) => m.text);
+    expect((await said()).at(-1)).toBe("蓝鲸计划在三楼。");
+    const follow = (await db.query<{ lane: string; caller_id: string | null; calls: string[] }>(
+      "select lane, caller_id, call_seqs::text[] as calls from agent_runs where agent_id = $1 and conversation_id = $2 and status = 'queued'",
+      [w.agent.id, w.g],
+    )).rows;
+    expect(follow).toEqual([{ lane: "others", caller_id: w.mia.id, calls: [String(call)] }]);
+    gateway.reply("周五下午三点。");
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await said()).slice(-2)).toEqual(["蓝鲸计划在三楼。", "周五下午三点。"]);
+  }
+
+  it("the group's latest message from someone the owner blocked since: the told reply still tells, and a member's call noted on it is still answered", async () => {
+    await toldPastABlock("owner");
+  });
+
+  it("the group's latest message from someone who blocked the owner since: the told reply still tells, and a member's call noted on it is still answered", async () => {
+    await toldPastABlock("ned");
+  });
+
   it("不用: nothing happens", async () => {
     const { w, whisper } = await whispered();
     const before = await runsOf(w.agent.id, w.g);

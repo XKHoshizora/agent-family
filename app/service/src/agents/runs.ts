@@ -483,7 +483,8 @@ export async function hearFrom(t: Tx, runId: string, from: number, to: number | 
  * toward its line, never as a call). A run whose caller is dropped becomes the remaining calls' by `followUp`'s rule —
  * its owner's own when the owner is behind one of them, else the earliest one's — and a person's while a person's call
  * is left (a reply nobody asked for keeps its lane, caller and trigger). The owner's own call is never dropped (nobody has
- * a block with themselves): `begin` asks this of every group run (none in the Agent's own conversation). Returns what the run now covers and has noted (empty when nothing was dropped: one query),
+ * a block with themselves): `begin` asks this of every group run (none in the Agent's own conversation) but a reply
+ * `告诉他们` queued, which answers nobody's call (its follow-up holds what was noted on it to the rule). Returns what the run now covers and has noted (empty when nothing was dropped: one query),
  * or null when no call is left — then only its `pending_seq` is cleared, so no follow-up answers a dropped call.
  */
 export async function dropBlockedCalls(t: Tx, runId: string, ownerId: string): Promise<{ covers_seq?: string | null; pending_seq?: string | null } | null> {
@@ -1278,8 +1279,9 @@ export async function followUp(
   );
   // The calls the run noted (`callSeqs`, its `call_seqs`: each recorded as it was accepted when it was sent), never read
   // again from the text, which a rename or a member joining or leaving since would read otherwise (fix round 1, I1).
-  // (A told reply (`告诉他们`) took on no call, so none is in its `call_seqs`: what was noted on it since its claim, between what
-  // it covers and `pending`, is read from the messages' stored mentions — those that name this Agent — as the sender stored them.)
+  // (A told reply (`告诉他们`) answers nobody's call — its `call_seqs` hold only the group's latest message when it was queued,
+  // what it covers, which is no call — and a call folded into it is only noted: what was noted on it, between what it covers
+  // and `pending`, is read from the messages' stored mentions — those that name this Agent — as the sender stored them.)
   const noted = new Set(
     toldReply
       ? (
