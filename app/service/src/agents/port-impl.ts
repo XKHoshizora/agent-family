@@ -256,6 +256,14 @@ function followUpSeq(state: RunState, agent: AgentRow, end: RunEnd): number | nu
 /** A run that ends so is followed by nothing, and what was noted on it (`pending_seq`) is cleared as it ends. */
 const droppedOnEnd = (end: RunEnd): boolean => end.status === "cancelled" && end.error === "agent_removed";
 
+/*
+ * `keepsNothingNoted` (round 2, N-3): the members' calls noted on a told reply (`告诉他们`) are never held to its owner. However
+ * it ends — posted or not; failed as it ran (`finish`), or ended by recovery at start-up, a release or the stale-run sweep
+ * (`recoverRun`, which follows no other failed run) — they go to an ordinary follow-up at once by the one rule
+ * (`followUpSeq`: unless the Agent's pause, delete, leaving or missing model dropped them, as for any run), and the told
+ * run keeps none of them (`pending_seq` cleared, `call_seqs` empty): a retry of it tells with nothing noted.
+ */
+
 /**
  * A run's in-process flags, from its claim until it has finished. A delta waiting to be delivered keeps the flags it
  * was emitted under, so once `silenced` it stays dropped, however late the hub gets to it — also after `finish` has
@@ -1169,11 +1177,13 @@ export class DbAgentPort implements AgentPort {
       const reminder = await remindInSettlement(t, config, run.ownerId, settled, now, agent.deleted ? null : agent.id);
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
       const resetsAt = final.status === "failed" && final.resetsAt !== undefined ? final.resetsAt : null;
+      // A told reply keeps nothing noted once its end has decided its follow-up (`keepsNothingNoted`).
       const updated = await t.query<RunRow>(
         `update agent_runs as r set status = $2, error = $3, resets_at = $4, finished_at = now(),
-                pending_seq = case when $5::boolean then null else r.pending_seq end
+                pending_seq = case when $5::boolean or $6::boolean then null else r.pending_seq end,
+                call_seqs = case when $6::boolean then '{}' else r.call_seqs end
           where r.id = $1 returning ${RUN_COLUMNS}`,
-        [run.id, final.status, error, resetsAt, droppedOnEnd(final)],
+        [run.id, final.status, error, resetsAt, droppedOnEnd(final), state.rows[0].told],
       );
       const ended: Announced = { ownerId: run.ownerId, conversationId: run.conversationId, run: toWireRun(updated.rows[0]!) };
       const next = followUpSeq(state.rows[0], agent, final);
@@ -1266,7 +1276,8 @@ export function createAgentPort(deps: AgentPortDeps): DbAgentPort {
  * In the same transaction its hold is released by a settlement that costs nothing (whatever the upstream reported died
  * with the process: no tokens, all forgiven) — unless it already has its usage record: it is never settled twice. A
  * posted or cancelled run is followed up by the one rule (`followUpSeq`: queued, for the worker about to start); a
- * failed one is not, so nothing is called again on its own (spec 6.5) and a retry answers everything. Queued runs are
+ * failed one is not, so nothing is called again on its own (spec 6.5) and a retry answers everything — but a told reply's
+ * noted calls, which are followed up whatever it ended as (`keepsNothingNoted`). Queued runs are
  * left as they are. Nothing is pushed (no socket can be open yet): a client learns the state from `GET …/run`. A run
  * that cannot be recovered is logged and left for the stale-run sweep or the next start. Returns how many were
  * recovered. The same ending, while the service runs, is `DbAgentPort.releaseRun` (one transaction of `recoverRun`).
@@ -1325,14 +1336,17 @@ async function recoverRun(t: Tx, config: Config, runId: string, log: Pick<Fastif
   const error = end.status === "failed" || end.status === "cancelled" ? (end.error ?? null) : null;
   const updated = await t.query<RunRow>(
     `update agent_runs as r set status = $2, error = $3, finished_at = now(),
-            pending_seq = case when $4::boolean then null else r.pending_seq end
+            pending_seq = case when $4::boolean or $5::boolean then null else r.pending_seq end,
+            call_seqs = case when $5::boolean then '{}' else r.call_seqs end
       where r.id = $1 returning ${RUN_COLUMNS}`,
-    [runId, end.status, error, droppedOnEnd(end)],
+    [runId, end.status, error, droppedOnEnd(end), state.told],
   );
   if (reply === null) return { runs: [], told: noneTold(), charged: null };
   const { agent, conversationId } = reply;
   const ended: Announced = { ownerId: agent.ownerId, conversationId, run: toWireRun(updated.rows[0]!) };
-  const next = end.status !== "failed" ? followUpSeq(state, agent, end) : null;
+  // A failed run is followed by nothing on its own (its retry answers everything) — but a told reply's noted calls, which
+  // were never part of what failed, are followed up at once (`keepsNothingNoted`).
+  const next = end.status !== "failed" || state.told ? followUpSeq(state, agent, end) : null;
   const { run: followed, ...told } =
     next === null ? followUpOf(null) : await followUp(t, agent, conversationId, Number(state.covers_seq ?? 0), next, state.call_seqs, config);
   return {
