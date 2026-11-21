@@ -186,12 +186,18 @@ export interface Usage {
 }
 
 export interface AgentPort {
-  /** The oldest queued reply whose owner has fewer than `agentMaxConcurrentRuns` running, now `running`; null when none. */
+  /**
+   * The oldest queued reply whose owner has fewer than `agentMaxConcurrentRuns` running, now `running`; null when none. A
+   * reply held back at admission is passed over while every call it waits for runs, and, until it is admitted, so are its
+   * owner's younger replies that would be paid from the same source (first come, first served per payer and source).
+   */
   claimNext(): Promise<RunTicket | null>;
   /**
    * Resolves the model, builds what the model is shown (never no turn at all), admits the call and marks the Agent's
-   * read position — or says why the run ends at once; rejects with `RunNotRunning` when the run was ended elsewhere
-   * meanwhile. Reading the attachments stops between files once the run should
+   * read position — or says why the run ends at once (a reply held back at admission, its run queued again to wait for
+   * room, ends this attempt here too: `finish` given that end does nothing, a later attempt being the run's own); rejects
+   * with `RunNotRunning` when the run was
+   * ended elsewhere meanwhile. Reading the attachments stops between files once the run should
    * stop (it then ends as `shouldStop` says) and is bounded by the run's time limit (`failed`, `busy`). `closing`
    * aborts when the service is closing: before the call is admitted, `begin` then rejects with its reason and records
    * nothing — the run is still `running`, unadmitted, and the caller ends it (`release`).
@@ -240,11 +246,11 @@ export interface AgentPort {
    * unreported null and then `estimated`, counted as `finish`'s fallback is) and the most its next call can cost
    * (`nextInputTokens`, the bound of everything that call will send, and its whole output limit) are held for it — the
    * hold raised to that, never lowered. "ok": another round that may call tools (within `TOOLS.maxPoints`, no budget of
-   * its lane reached, and what is left of its source covers the hold); "final": one last call, which calls none (else,
-   * while something is left after what the reply has spent; the hold may then pass what is left, as an admitted call's
-   * may); "stop": no further call (nothing is left after what it has spent, or the run is no longer running), the hold
-   * as it was — the worker posts what the reply wrote, or with nothing written the run fails `no_quota`. A provider's
-   * model holds nothing: "ok", or "final" once a budget of its lane is reached.
+   * its lane reached, and what is left of its source covers the hold); "final": one last call, which calls none (else —
+   * also when nothing is left: the hold may then pass what is left, even below zero; a reply that has started is never
+   * refused for money); "stop": no further call, only for a run no longer running (ended elsewhere), the hold as it was —
+   * the worker posts what the reply wrote. A provider's model holds nothing: "ok", or "final" once a budget of its lane
+   * is reached.
    */
   extend(run: RunTicket, spent: Usage | null, estimated: Estimated, nextInputTokens: number): Promise<"ok" | "final" | "stop">;
   /**

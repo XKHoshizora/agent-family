@@ -63,6 +63,7 @@ import { registerSync } from "./sync/routes.ts";
 import { registerWebClient } from "./web.ts";
 import { pushWhispers, registerWhisperRoutes } from "./whispers/routes.ts";
 import { expireWhispers, removeOldWhispers } from "./whispers/store.ts";
+import { deliverReminders } from "./metering/reminders.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
 export interface Deps {
@@ -315,7 +316,8 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   // The record of what memory changed is kept 30 days (memory/sweep.ts): its own timer, every `MEMORY.changesSweepMs` (0: none), so that it
   // runs whether or not the attachment sweep is switched off and whatever that sweep does. A failure is logged (a code, never a note).
   // Whispers left open 7 days expire on the same timer (whispers/store.ts), each pushed to its owner (never logged); answered
-  // and expired ones made 30 days ago are deleted.
+  // and expired ones made 30 days ago are deleted. Reminders about money recorded by a settlement whose whisper was never
+  // made (the service stopped between the two) are made, pushed and counted (metering/reminders.ts `deliverReminders`).
   const changeSweeper = startSweeper({
     run: async () => {
       await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
@@ -324,9 +326,14 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
         return [];
       });
       await removeOldWhispers(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "whisper clean-up failed; trying again next interval"));
+      const reminded = await deliverReminders(deps.db, config, app.log).catch((err: unknown) => {
+        app.log.warn({ code: (err as { code?: string }).code }, "reminder sweep failed; trying again next interval");
+        return [];
+      });
+      for (const r of reminded) app.log.info({ metric: r.metric }, "a reminder about money was made for its owner");
       // (The hub is decorated once the app is built; a run before that has nobody to tell.)
       const hub = app.hasDecorator("realtime") ? app.realtime : null;
-      if (hub) pushWhispers(hub, expired);
+      if (hub) pushWhispers(hub, [...expired, ...reminded.flatMap((r) => (r.whisper ? [r.whisper] : []))]);
       return { unsent: 0, abandoned: 0 };
     },
     intervalMinutes: config.memory.changesSweepMs / 60_000,

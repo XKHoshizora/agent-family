@@ -532,7 +532,7 @@ describe("a reply that offers tools", () => {
     expect(fake.extends[1]!.next).toBe(Buffer.byteLength(PLAIN) + Buffer.byteLength("附近有什么好吃的？"));
   });
 
-  it("a later round refused (400) with nothing left to hold the ordinary call for: it is not made, and the reply ends as when nothing more can be held", async () => {
+  it("a later round refused (400) when the port says stop (the run ended elsewhere): the ordinary call is not made, and the reply ends with what it wrote", async () => {
     const said = scriptedGateway()
       .callTools([{ name: "search", input: { query: "a" } }], { text: "我先查一下。", usage: U(100, 10) })
       .fail("provider_unavailable", { status: 400 });
@@ -540,11 +540,11 @@ describe("a reply that offers tools", () => {
     await runOn(withText, said);
     expect(said.calls).toHaveLength(2);
     expect(withText.extends).toHaveLength(2);
-    // What it said before its tool call was its acknowledgement, posted then; after it, it wrote nothing: as a reply that
-    // could hold nothing more and wrote nothing.
+    // What it said before its tool call was its acknowledgement, posted then; after it, it wrote nothing, and the run
+    // ended elsewhere (the port's "stop" never means money now): `cancelled`, the acknowledgement standing.
     expect(withText.acks.map((a) => a.text)).toEqual(["我先查一下。"]);
     expect(withText.posted).toEqual([]);
-    expect(finishedAs(withText)).toEqual([{ status: "failed", error: "no_quota" }]);
+    expect(finishedAs(withText)).toEqual([{ status: "cancelled" }]);
     // Had the acknowledgement not been posted, what it said would stand, as cut.
     const kept = fakePort({ extend: (n) => (n === 1 ? "ok" : "stop"), acknowledge: async () => "refused" });
     await runOn(
@@ -563,7 +563,7 @@ describe("a reply that offers tools", () => {
     await runOn(silent, mute);
     expect(mute.calls).toHaveLength(2);
     expect(silent.posted).toEqual([]);
-    expect(finishedAs(silent)).toEqual([{ status: "failed", error: "no_quota" }]);
+    expect(finishedAs(silent)).toEqual([{ status: "cancelled" }]);
   });
 
   it("the owner's stop between rounds, or between two tool calls: the acknowledgement stays, nothing more is called, run or posted, and the run ends stopped", async () => {
@@ -749,7 +749,7 @@ describe("a reply that offers tools", () => {
     expect(fake.posted.map((p) => p.text)).toEqual(["够了。"]);
   });
 
-  it("the port's word on money: final makes the next call the last; stop ends the reply with what it wrote, or with no_quota when it wrote nothing", async () => {
+  it("the port's word: final makes the next call the last; stop (the run ended elsewhere — money never stops a reply) ends the reply with what it wrote, or with nothing when it wrote nothing", async () => {
     const finalGateway = scriptedGateway().callTools([{ name: "search", input: { query: "a" } }]).reply("就这样。");
     const final = fakePort({ extend: () => "final" });
     await runOn(final, finalGateway);
@@ -768,7 +768,7 @@ describe("a reply that offers tools", () => {
     const stopSilent = fakePort({ extend: () => "stop" });
     await runOn(stopSilent, nothing);
     expect(stopSilent.posted).toEqual([]);
-    expect(stopSilent.finished).toEqual([{ end: { status: "failed", error: "no_quota" }, usage: U(100, 10), fallback: expect.any(Object) }]);
+    expect(stopSilent.finished).toEqual([{ end: { status: "cancelled" }, usage: U(100, 10), fallback: expect.any(Object) }]);
   });
 
   it("the port failing to answer about money ends the reply with what it wrote, as cut; with nothing written it fails busy, our own trouble", async () => {

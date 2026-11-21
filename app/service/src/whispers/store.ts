@@ -29,7 +29,7 @@ import { weight } from "../metering/tokens.ts";
  * same Agent; other conversations' leavings take other whisper rows.
  */
 
-export const WHISPER_KINDS = ["found_elsewhere", "tools_off", "memory"] as const;
+export const WHISPER_KINDS = ["found_elsewhere", "tools_off", "memory", "allowance"] as const;
 export type WhisperKind = (typeof WHISPER_KINDS)[number];
 export const WHISPER_STATUSES = ["open", "accepted", "declined", "expired"] as const;
 export type WhisperStatus = (typeof WHISPER_STATUSES)[number];

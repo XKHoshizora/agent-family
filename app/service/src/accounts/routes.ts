@@ -3,7 +3,7 @@ import type { ZodTypeProvider } from "fastify-type-provider-zod";
 import { z } from "zod";
 import { agentLimit, countLiveAgents } from "../agents/store.ts";
 import { perPrincipalLimit } from "../limits.ts";
-import { chargeSource, headroom, readHolds } from "../metering/admit.ts";
+import { chargeSource } from "../metering/admit.ts";
 import { requirePrincipal } from "../session.ts";
 import { formatPoints, freeUsedToday, memoryUsedToday, nextSiteMidnight, siteDayStart } from "./store.ts";
 
@@ -55,14 +55,13 @@ export function registerAccountRoutes(app: FastifyInstance): void {
       await readLimit(req, me.id);
       const now = new Date();
       // One connection, one read-only snapshot (taken at its first read): a settlement committing meanwhile is seen
-      // whole or not at all — never a usage record without its charge, or a hold without its call.
-      const { account, agentCount, used, memoryUsed, holds, recent } = await db.tx(async (t) => {
+      // whole or not at all — never a usage record without its charge.
+      const { account, agentCount, used, memoryUsed, recent } = await db.tx(async (t) => {
         await t.query("set transaction isolation level repeatable read, read only");
         const account = await t.query<{ tier: string; balance_micro: string }>("select tier, balance_micro::text from accounts where principal_id = $1", [me.id]);
         const agentCount = await countLiveAgents(t, me.id);
         const used = await freeUsedToday(t, me.id, now, config.siteTimezone);
         const memoryUsed = await memoryUsedToday(t, me.id, now, config.siteTimezone);
-        const holds = await readHolds(t, me.id);
         const recent = await t.query<{ agent_id: string | null; purpose: "reply" | "draft" | "memory"; model: string; source: "site" | "provider"; points: string; charged: string; replies: number }>(
           // What the person was charged (the allowance and the balance), not the true cost: what was forgiven is not
           // theirs to see as spent. A memory call's `memory_micro` is the site's, shown as such (`paidBy`).
@@ -76,7 +75,7 @@ export function registerAccountRoutes(app: FastifyInstance): void {
             order by sum(free_micro + balance_micro + memory_micro) desc, model, source, agent_id, purpose`,
           [me.id, siteDayStart(now, config.siteTimezone, RECENT_DAYS - 1)],
         );
-        return { account, agentCount, used, memoryUsed, holds, recent };
+        return { account, agentCount, used, memoryUsed, recent };
       });
       // An account with no row yet is a free-tier account with nothing in it; reading never creates one.
       const tier = account.rows[0]?.tier ?? "free";
@@ -97,8 +96,9 @@ export function registerAccountRoutes(app: FastifyInstance): void {
           used: formatPoints(memoryUsed),
           resetsAt: nextSiteMidnight(now, config.siteTimezone).toISOString(),
         },
-        // Admission's own rule (src/metering/admit.ts), running calls' holds included; read without the lock.
-        canStartFreeReply: chargeSource("free", headroom({ freeDailyMicro: config.freeDailyMicro, freeUsedMicro: used, balanceMicro, holds })) !== null,
+        // Admission's own rule (src/metering/admit.ts): a reply is refused only when nothing is left of either source;
+        // what running calls hold makes it wait, not fail. Read without the lock.
+        canStartFreeReply: chargeSource("free", { freeMicro: config.freeDailyMicro - used, balanceMicro }) !== null,
         recent: recent.rows.map((r) => ({
           agentId: r.agent_id,
           purpose: r.purpose,

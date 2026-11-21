@@ -224,6 +224,32 @@ const toolsSchema = z.strictObject({
 /** `TOOLS` unset: every default. */
 export const DEFAULT_TOOLS: Readonly<ToolsConfig> = Object.freeze(toolsSchema.parse({}));
 
+/** What the open holds of one payer may add up to (`HOLDS`; README "Metering", Admission). */
+export interface HoldsConfig {
+  /**
+   * An admission rule: a reply starts beside the owner's other running calls on its source (today's free allowance, or
+   * the balance) only when all their holds, its own included, add up to at most this share of what is left of it; else it
+   * waits, queued, unless it would be the only one holding against that source (src/metering/admit.ts). A reply's later
+   * rounds are held against all that is left, whatever the share. From 0.01 (below, the share would round to nothing) to
+   * 1: a share above 1 would let replies starting together hold more than there is, and the debt bound would not hold.
+   */
+  maxOpenShare: number;
+}
+
+const holdsSchema = z.strictObject({
+  maxOpenShare: z.number().min(0.01).max(1).default(1),
+});
+
+/** When the owner is reminded that the day's free allowance runs low (`ALLOWANCE`; src/metering/reminders.ts). */
+export interface AllowanceConfig {
+  /** The share of the day's free allowance used at which its owner is told, once a day. Above 0, below 1. */
+  warnAt: number;
+}
+
+const allowanceSchema = z.strictObject({
+  warnAt: z.number().gt(0).lt(1).default(0.8),
+});
+
 /**
  * What an Agent's memory is tuned by (`MEMORY`); every number is a site setting with this default (the plan's Numbers;
  * tuned and recorded in the last tasks). Sizes are in weight (memory/weight.ts: ceil(utf-8 bytes / 3), about a token), times in milliseconds.
@@ -537,6 +563,10 @@ const envSchema = z.object({
   MEMORY: jsonVariable(memorySchema, memorySchema.parse({})),
   /** JSON object of what bounds a reply's tools (see ToolsConfig); every field optional, unset or empty: all defaults. */
   TOOLS: jsonVariable(toolsSchema, toolsSchema.parse({})),
+  /** JSON object of what one owner's open holds may add up to (see HoldsConfig); unset or empty: the default. */
+  HOLDS: jsonVariable(holdsSchema, holdsSchema.parse({})),
+  /** JSON object of when an owner is reminded of the day's free allowance (see AllowanceConfig); unset or empty: the default. */
+  ALLOWANCE: jsonVariable(allowanceSchema, allowanceSchema.parse({})),
   BLOB_DIR: z.string().min(1).default("./data/blobs"),
   /** Directory with the built web client (index.html and /assets); unset: the service serves no web files. */
   WEB_DIST: optionalString,
@@ -671,6 +701,10 @@ export interface Config {
   memory: MemoryConfig;
   /** What bounds a reply's tools. */
   tools: ToolsConfig;
+  /** What one owner's open holds against a source may add up to. */
+  holds: HoldsConfig;
+  /** When an owner is reminded of the day's free allowance. */
+  allowance: AllowanceConfig;
   blobDir: string;
   /** Absolute path of the built web client to serve, or undefined to serve none. */
   webDist: string | undefined;
@@ -839,6 +873,8 @@ export function loadConfig(env: Record<string, string | undefined> = process.env
     proactive: e.PROACTIVE,
     memory: e.MEMORY,
     tools: e.TOOLS,
+    holds: e.HOLDS,
+    allowance: e.ALLOWANCE,
     blobDir: e.BLOB_DIR,
     webDist: e.WEB_DIST === undefined ? undefined : path.resolve(e.WEB_DIST),
     port: e.PORT,

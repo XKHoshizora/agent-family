@@ -1,11 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { AppError } from "../src/errors.ts";
-import { admitRun, type Admission } from "../src/metering/admit.ts";
+import { admitRun, HeldBack, type Admission } from "../src/metering/admit.ts";
 import { settle, type SettleLog, type Usage } from "../src/metering/settle.ts";
 import type { Resolved } from "../src/models/resolve.ts";
 import { signUp } from "./helpers/actors.ts";
 import { useApp } from "./helpers/harness.ts";
-import { costOf, ESTIMATE, FULL_USAGE, grant, MAX_COST, METER_ENV, meteredAgent, OVER_USAGE, runningRun } from "./helpers/metering.ts";
+import { costOf, ESTIMATE, FULL_USAGE, grant, MAX_COST, METER_ENV, meteredAgent, OVER_USAGE, runningRun, type MeteredAgent } from "./helpers/metering.ts";
 
 /**
  * Review Focus 2: however many replies one user starts at once, the forgiven free overrun and the negative balance
@@ -13,7 +13,9 @@ import { costOf, ESTIMATE, FULL_USAGE, grant, MAX_COST, METER_ENV, meteredAgent,
  * real Postgres; a hold is released only by settlement. Four rounds per scenario: all admissions at once and then all
  * settlements at once, or every call admitting and settling on its own while the others do the same; each order once
  * with every call costing exactly what it held (`FULL_USAGE`) and once with every call reporting far more than it
- * held (`OVER_USAGE`, 15 points against a hold of 2), which settlement charges only up to the hold.
+ * held (`OVER_USAGE`, 15 points against a hold of 2), which settlement charges only up to the hold. Since Task H a reply
+ * whose hold does not fit beside the others' is not refused but held back (it would wait, queued, for one of them to
+ * end): only a reply that starts alone on a source may hold more than is left of it.
  */
 
 const { app, db } = useApp({ env: METER_ENV });
@@ -33,13 +35,14 @@ const NO_WARNINGS: SettleLog = {
   },
 };
 
-type Attempt = { run: string; admission: Admission } | { run: string; refused: AppError };
+type Attempt = { run: string; admission: Admission } | { run: string; refused: AppError } | { run: string; held: HeldBack };
 
 async function tryAdmit(run: string, ownerId: string, resolved: Resolved): Promise<Attempt> {
   try {
     return { run, admission: await db.tx((t) => admitRun(t, config(), run, ownerId, resolved, ESTIMATE, NOW)) };
   } catch (err) {
     if (err instanceof AppError) return { run, refused: err };
+    if (err instanceof HeldBack) return { run, held: err };
     throw err;
   }
 }
@@ -49,10 +52,18 @@ const settleWith = (run: string, usage: Usage) =>
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-/** `PARALLEL` running drafts of `ownerId` contend for admission on `resolved`; every admitted one is settled. */
-async function contend(ownerId: string, resolved: Resolved, round: number): Promise<Attempt[]> {
+/** `PARALLEL` Agents of `owner` on `model`, each to reply once. */
+async function agentsOf(owner: Awaited<ReturnType<typeof signUp>>, model: { source: "site"; id: string }): Promise<MeteredAgent[]> {
+  const agents: MeteredAgent[] = [];
+  for (let i = 0; i < PARALLEL; i++) agents.push(await meteredAgent(app, db, owner, model));
+  return agents;
+}
+
+/** A running reply of each of `agents` (of `ownerId`) contends for admission; every admitted one is settled. */
+async function contend(ownerId: string, agents: MeteredAgent[], round: number): Promise<Attempt[]> {
   const usage = usageOf(round);
-  const runs = await Promise.all(Array.from({ length: PARALLEL }, () => runningRun(db, ownerId)));
+  const resolved: Resolved = agents[0]!.resolved;
+  const runs = await Promise.all(agents.map((agent) => runningRun(db, ownerId, agent)));
   if (round % 2 === 0) {
     const attempts = await Promise.all(runs.map((run) => tryAdmit(run, ownerId, resolved)));
     await Promise.all(attempts.flatMap((a) => ("admission" in a ? [settleWith(a.run, usage)] : [])));
@@ -99,7 +110,8 @@ async function totals(ownerId: string) {
 function split(attempts: Attempt[]) {
   const admitted = attempts.flatMap((a) => ("admission" in a ? [a.admission] : []));
   const refused = attempts.flatMap((a) => ("refused" in a ? [a.refused] : []));
-  return { admitted, refused, reasons: [...new Set(refused.map((e) => `${e.status} ${e.code} ${e.details.reason}`))] };
+  const held = attempts.flatMap((a) => ("held" in a ? [a.held] : []));
+  return { admitted, refused, held, reasons: [...new Set(refused.map((e) => `${e.status} ${e.code} ${e.details.reason}`))] };
 }
 
 /** The whole site: every balance equals its ledger, every record's cost is split exactly, and no hold is left. */
@@ -119,34 +131,36 @@ it("runs against a real pool of at least 10 connections", () => {
 });
 
 describe(`${PARALLEL} replies started at once by one user`, () => {
-  it("free model, allowance 1.5 × the maximum cost, balance 0: two admitted, at most one maximum cost of free overrun forgiven", { timeout: 60_000 }, async () => {
+  it("free model, allowance 1.5 × the maximum cost, balance 0: the first starts alone, the rest wait — no more start until one has ended; at most one maximum cost of free overrun forgiven", { timeout: 120_000 }, async () => {
     for (let round = 0; round < ROUNDS; round++) {
       const owner = await signUp(app, `freerace${round}`);
-      const { resolved } = await meteredAgent(app, db, owner, { source: "site", id: "meter_free" });
-      const { admitted, refused, reasons } = split(await contend(owner.id, resolved, round));
-      expect(admitted.length).toBeLessThanOrEqual(2);
-      expect(admitted).toEqual([
-        { chargeTo: "free", holdMicro: MAX_COST },
-        { chargeTo: "free", holdMicro: MAX_COST },
-      ]);
-      expect(refused).toHaveLength(PARALLEL - 2);
-      expect(reasons).toEqual(["402 no_quota free_and_balance"]);
+      const agents = await agentsOf(owner, { source: "site", id: "meter_free" });
+      const { admitted, refused, held, reasons } = split(await contend(owner.id, agents, round));
+      for (const a of admitted) expect(a).toEqual({ chargeTo: "free", holdMicro: MAX_COST });
+      expect(admitted.length + held.length + refused.length).toBe(PARALLEL);
+      if (round % 2 === 0) expect([admitted.length, held.length]).toEqual([1, PARALLEL - 1]);
+      // Each on its own: a reply that comes after the first has ended starts alone on what is left (1 point), and then
+      // nothing is left.
+      else expect(admitted.length).toBeLessThanOrEqual(2);
+      expect(reasons.every((r) => r === "402 no_quota free_and_balance")).toBe(true);
       const t = await totals(owner.id);
       expect(t.overrun).toBeLessThanOrEqual(MAX_COST);
-      expect(t).toEqual({ records: 2, cost: 2n * costOf(usageOf(round)), free: 3_000_000n, charged: 0n, overrun: 1_000_000n, freeUsed: 3_000_000n, balance: 0n });
+      expect(t.freeUsed).toBeLessThanOrEqual(3_000_000n);
+      expect(t.balance).toBe(0n);
       await expectBooksBalanced();
     }
   });
 
-  it("paid model, balance 0.5 × the maximum cost: exactly one admitted, the balance ends no lower than minus one maximum cost", { timeout: 60_000 }, async () => {
+  it("paid model, balance 0.5 × the maximum cost: exactly one starts, the others wait and are then refused once nothing is left; the balance ends no lower than minus one maximum cost", { timeout: 120_000 }, async () => {
     for (let round = 0; round < ROUNDS; round++) {
       const owner = await signUp(app, `paidrace${round}`);
-      const { resolved } = await meteredAgent(app, db, owner, { source: "site", id: "meter_paid" });
+      const agents = await agentsOf(owner, { source: "site", id: "meter_paid" });
       await grant(db, owner.id, MAX_COST / 2n);
-      const { admitted, refused, reasons } = split(await contend(owner.id, resolved, round));
+      const { admitted, refused, held, reasons } = split(await contend(owner.id, agents, round));
       expect(admitted).toEqual([{ chargeTo: "balance", holdMicro: MAX_COST }]);
-      expect(refused).toHaveLength(PARALLEL - 1);
-      expect(reasons).toEqual(["402 no_quota balance"]);
+      expect(held.length + refused.length).toBe(PARALLEL - 1);
+      if (round % 2 === 0) expect(held).toHaveLength(PARALLEL - 1);
+      expect(reasons.every((r) => r === "402 no_quota balance")).toBe(true);
       const t = await totals(owner.id);
       expect(t.balance).toBeGreaterThanOrEqual(-MAX_COST);
       expect(t).toEqual({ records: 1, cost: costOf(usageOf(round)), free: 0n, charged: MAX_COST, overrun: 0n, freeUsed: 0n, balance: -MAX_COST / 2n });
@@ -154,19 +168,22 @@ describe(`${PARALLEL} replies started at once by one user`, () => {
     }
   });
 
-  it("free model with both an allowance and a balance: each bound holds on its own source", { timeout: 60_000 }, async () => {
+  it("free model with both an allowance and a balance: each bound holds on its own source", { timeout: 120_000 }, async () => {
     for (let round = 0; round < ROUNDS; round++) {
       const owner = await signUp(app, `bothrace${round}`);
-      const { resolved } = await meteredAgent(app, db, owner, { source: "site", id: "meter_free" });
+      const agents = await agentsOf(owner, { source: "site", id: "meter_free" });
       await grant(db, owner.id, MAX_COST / 2n);
-      const { admitted, refused, reasons } = split(await contend(owner.id, resolved, round));
-      expect(admitted.map((a) => a.chargeTo).sort()).toEqual(["balance", "free", "free"]);
-      expect(refused).toHaveLength(PARALLEL - 3);
-      expect(reasons).toEqual(["402 no_quota free_and_balance"]);
+      const { admitted, refused, held, reasons } = split(await contend(owner.id, agents, round));
+      expect(admitted.length + held.length + refused.length).toBe(PARALLEL);
+      // All at once: one on the allowance, the rest wait behind it (the allowance has something left after its hold, so a
+      // reply is not sent on to the balance). Each on its own: one more may start alone on each source as the one before
+      // it has ended.
+      if (round % 2 === 0) expect([admitted.map((a) => a.chargeTo), held.length]).toEqual([["free"], PARALLEL - 1]);
+      else expect(admitted.length).toBeLessThanOrEqual(3);
+      expect(reasons.every((r) => r === "402 no_quota free_and_balance")).toBe(true);
       const t = await totals(owner.id);
       expect(t.overrun).toBeLessThanOrEqual(MAX_COST);
       expect(t.balance).toBeGreaterThanOrEqual(-MAX_COST);
-      expect(t).toEqual({ records: 3, cost: 3n * costOf(usageOf(round)), free: 3_000_000n, charged: MAX_COST, overrun: 1_000_000n, freeUsed: 3_000_000n, balance: -MAX_COST / 2n });
       await expectBooksBalanced();
     }
   });

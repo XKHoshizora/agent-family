@@ -9,6 +9,7 @@ import { createDb, type Db } from "./db.ts";
 import { configureStats, formatStats, readStats } from "./memory/stats.ts";
 import { CHANGE_KEEP_DAYS, sweepMemoryChanges } from "./memory/sweep.ts";
 import { expireWhispers, removeOldWhispers, WHISPER_KEEP_DAYS, WHISPER_OPEN_DAYS } from "./whispers/store.ts";
+import { deliverReminders } from "./metering/reminders.ts";
 import { runMigrations } from "./migrate.ts";
 
 loadDotenv({ quiet: true });
@@ -123,6 +124,9 @@ if (command === "migrate") {
     console.log(`expired ${whispers.length} whisper(s) left open ${WHISPER_OPEN_DAYS} days`);
     const removed = await removeOldWhispers(db);
     console.log(`deleted ${removed} answered or expired whisper(s) made ${WHISPER_KEEP_DAYS} days ago`);
+    // And the reminders about money a settlement recorded but whose whisper was never made (their owners see them at their next sync).
+    const reminded = await deliverReminders(db, config, { warn: (what, msg) => console.error(`${msg} (code ${String(what.code)})`) });
+    console.log(`made ${reminded.filter((r) => r.whisper).length} reminder(s) about money left undelivered (${reminded.filter((r) => !r.whisper).length} of owners with no Agent left)`);
   } finally {
     await db.close();
   }

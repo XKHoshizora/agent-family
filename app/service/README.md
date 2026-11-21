@@ -131,6 +131,12 @@ the file and the clock tool one reply may run, 1–1 000, default 6, 4 and 1), `
 room for two in its context plan, at most a third of the conversation's), `runTimeoutMs` (how long a
 reply that offers tools may take in all, 1 000–3 600 000, default 300 000: 5 minutes; a reply that offers none is held
 to `AGENT_RUN_TIMEOUT_MS` alone)),
+`HOLDS` (what one owner's open holds may add up to, JSON, every field optional; Metering, Money that does not block:
+`maxOpenShare` (an admission rule: the share of what is left of a source — today's free allowance, or the balance —
+that the holds of the owner's running calls against it, a starting reply's own included, may add up to before that reply
+waits, queued; a reply's later rounds are held against all that is left; 0.01–1, default 1)),
+`ALLOWANCE` (when an owner is reminded of the day's free allowance, JSON, every field optional; Metering, Reminders:
+`warnAt` (the share of it used at which they are told, once a day; above 0 and below 1, default 0.8)),
 `HOST` (the address to listen on: an IPv4/IPv6 address or `localhost`, default `0.0.0.0`, every interface; `127.0.0.1` for local-only),
 `WEB_DIST` (optional: directory of the built web client to serve, see Deployment; unset serves none),
 `S3_*` (optional, all-or-none), `REGISTRATION_MODE` (`invite` | `open`, default `invite`),
@@ -387,10 +393,11 @@ ones the route then refuses. Over a limit: 429 `rate_limited`. Only
 
 Everything else is not rate limited.
 
-**Metrics in the log.** The service writes four kinds of line at `info`, each a JSON log object with a `metric` field,
+**Metrics in the log.** The service writes six kinds of line at `info`, each a JSON log object with a `metric` field,
 for an operator to tune the numbers above (and the site's models) from (nothing else about them is recorded or exposed):
 
-- `{ "metric": "run_wait_ms", "lane", "ms" }`, once for each reply the worker claims: how long it sat queued, in the lane
+- `{ "metric": "run_wait_ms", "lane", "ms" }`, once for each reply the worker claims (its first claim; not again when it is
+  claimed again after it was held back): how long it sat queued, in the lane
   (`own`, `others`, `proactive`) it ran in. Waits that grow mean the concurrency numbers (`AGENT_MAX_CONCURRENT_RUNS`,
   `AGENT_MAX_CONCURRENT_OTHERS_RUNS`, `AGENT_MAX_RUNS_IN_FLIGHT`) are too small for the traffic, or the upstream is slow.
 - `{ "metric": "caller_rate_limited", "callerId", "agentId", "conversationId" }`, once for each call on someone else's
@@ -402,6 +409,11 @@ for an operator to tune the numbers above (and the site's models) from (nothing 
   site model unable to use tools (its upstream refused them, or it called them garbled twice: Agents and runs, Tools in a
   reply): the site model's configuration is the operator's, so nothing else is done — such a model may want `tools: false`
   in `SITE_MODELS`.
+- `{ "metric": "allowance_warn_80" }`, `{ "metric": "allowance_empty" }`, `{ "metric": "balance_empty" }`, once for each
+  reminder an owner is sent (Metering, Reminders), nothing else with them: how often owners run low; `{ "metric":
+  "reminder_no_agent" }` once for each reminder that found its owner with no Agent at all to be told in.
+- `{ "metric": "run_held_back" }`, once each time a reply is held back at its admission (Metering, Money that does not
+  block): how often replies wait for one another's holds — each time, its next claim reads its conversation again.
 
 Proactive replies write four more (`proactive_skipped`, `judge_failed`, `judge_partial`, `judge_daily_limit`): Proactive
 replies, Log.
@@ -409,7 +421,7 @@ replies, Log.
 ### Usage and points
 
 Money is whole micro-points inside (1 point = 1 000 000) and a decimal string of points on the wire: `"12.5"`,
-`"0.000001"`, `"-2"` (a balance may go below zero, by less than one call's maximum cost). No floats. Points are given only by the
+`"0.000001"`, `"-2"` (a balance may go below zero so that a reply under way finishes: Metering, The debt bound). No floats. Points are given only by the
 operator (`npm run credits:grant`, to a person's handle; an Agent's handle is refused): there is no route that
 changes a balance or a tier, and `POST`/`PUT`/`PATCH`/`DELETE` on `/api/usage`, `/api/credits` and `/api/accounts`
 are the JSON 404.
@@ -429,9 +441,10 @@ free-plus-balance figure (`via.points`, Wire shapes).
   (a tier the configuration no longer names gets the `free` limit); `agentCount` is your Agents that are not deleted.
 - `balance` is the points balance. `free.allowance` is `FREE_DAILY_POINTS`, `free.used` what today's site-day has used,
   `free.resetsAt` the next midnight in `SITE_TIMEZONE` (ISO instant).
-- `canStartFreeReply`: whether a reply on a free-tier model would be admitted now: what is left of today's free
-  allowance, or of the balance, after what your running calls hold against it, is above zero (admission's own rule,
-  read at that moment). Memory calls never enter it: they are paid from their own allowance (`memory`).
+- `canStartFreeReply`: whether a reply on a free-tier model would start now rather than be refused: something is left of
+  today's free allowance, or the balance is above zero (admission's own rule, read at that moment; what your running
+  calls hold only makes a reply wait, Metering). Memory calls never enter it: they are paid from their own allowance
+  (`memory`).
 - `memory`: the memory allowance the site pays (Metering, "The memory allowance"): `allowance` is `MEMORY.freeDailyPoints`,
   `used` what today's site day has used of it, `resetsAt` the next midnight in `SITE_TIMEZONE`.
 - `recent`: the last 7 site-days (today included) summed per Agent, purpose, model and source: `purpose` is `reply`, `draft`
@@ -671,7 +684,9 @@ save the Agent to keep it.
   helps with, its tone; it has no tools and the persona grants no rights) as the system text, which nothing of yours
   enters; your `name`, `intro` and `field` only as data in the user turn — a fixed line, then them as JSON
   (`{"名称", "简介", "擅长领域"}`, empty strings for what you left out). Reasoning `none`; the model's output limit.
-- Refused before any call, with nothing recorded: 400 for the model; 402 `no_quota` (as a reply); 400
+- Refused before any call, with nothing recorded: 400 for the model; 402 `no_quota` when nothing is left (as a reply;
+  a draft never waits for your replies' holds: Metering, Money that does not block; its settlement may write a reminder
+  about your money: Metering, Reminders); 400
   `context_too_small` when the model's context, less its output limit and the instruction, cannot hold the data; 429
   `rate_limited` when you already have `AGENT_MAX_CONCURRENT_RUNS` (4) model calls running (replies, drafts and memory
   calls together); 502 `provider_unavailable` when the model cannot be called (a site model whose key variable is unset); 502
@@ -900,7 +915,8 @@ is a group you are a current member of: a direct chat and an Agent's own convers
 #### `POST /api/conversations/:id/runs/:runId/stop`
 
 *Session: required.* Body: none or `{}`. Stops the reply: a queued one at once (it never reaches the model; `run`
-`stopped` is pushed); a running one as soon as the worker notices (within 50 ms): what it had said so far is posted
+`stopped` is pushed) — also one that was running when you asked and that its admission held back to queued meanwhile
+(Metering, Money that does not block); a running one as soon as the worker notices (within 50 ms): what it had said so far is posted
 with `stopped: true` and the run ends `stopped` (nothing said: no message). A running one that no worker of this
 instance is working on — another instance's during a deploy, or one left by a process that is gone — is released at
 once, exactly as recovery releases one (Agents and runs, Recovery): `failed`, `provider_unavailable`, retryable, its
@@ -1409,7 +1425,7 @@ answers are byte for byte what they were before it existed. Its owner gets only 
 conversation (made at or after the seq their membership began): after leaving and coming back, the earlier ones are not
 sent again.
 
-**WireWhisper**: `{"id", "conversationId", "agentId", "afterSeq": 42, "kind": "found_elsewhere" | "tools_off" | "memory",
+**WireWhisper**: `{"id", "conversationId", "agentId", "afterSeq": 42, "kind": "found_elsewhere" | "tools_off" | "memory" | "allowance",
 "text": "…", "actions": ["tell", "dismiss"], "status": "open" | "accepted" | "declined" | "expired", "createdAt",
 "detail"?: …}`. `text` is one line (at most 2 000 weight); `actions` the buttons it offers (none, one or both, each once);
 `detail` what its kind keeps with it, when it has any: at most 8 192 bytes of JSON (utf-8), nested at most 6 deep, at most
@@ -1455,7 +1471,9 @@ whisper open, to answer again. `不用` (decline) does nothing more. Vault notes
 (Model providers, Models: `tools`): `这个模型不支持查东西，已改为普通聊天。可以在模型设置里重新打开再试。`, in that reply's
 conversation after the message it was answering, no button (nothing to answer: it stays open until it expires), once per
 model each time it is turned off; not made when its owner or the Agent is no longer a member there (the model is marked
-all the same).
+all the same). `allowance` — a reminder about your money (Metering, Reminders): in the replying Agent's own conversation
+(after a persona draft, or a reply whose Agent was deleted, the conversation of the Agent you used last), no button, once
+per threshold and site day (`余额用完了。` once each time the balance falls to zero or below).
 
 #### `GET /api/conversations/:id/whispers`
 
@@ -2837,13 +2855,26 @@ owner's Agents fills at most 3 of the 4 places, so the owner's own reply finds o
 (16) at once in the service. Each claim logs how long the reply waited (`run_wait_ms`, Rate limits, Metrics in the log).
 A draft counts the owner's running calls under the account's lock, the worker's claim does not take that lock: so a
 draft and a reply that start at the same moment may briefly run one over the limit (never more: the worker claims one
-run at a time, and drafts wait for each other on the lock). It is woken after a trigger commits and also looks every
-2 s. Per run:
+run at a time, and drafts wait for each other on the lock). A reply held back at its admission (Metering, Money that
+does not block) keeps its mark (`held_back_by`, `held_back_on`) until it is admitted: it is passed over while every call it
+waits for is still running, and until it is admitted — queued, or claimed again and not admitted yet — the owner's younger
+replies that would be paid from the same source are passed over too (first come, first served per payer and source, so a
+reply with a large hold is not passed for ever by smaller ones; which source a queued reply would be paid from is
+admission's own rule on what its owner has now; a free-tier reply held back with nothing left of either source after the
+holds waits on both, `held_back_on` `any`, and holds back the younger replies either would pay); a reply on the owner's own
+provider key, or one the other source would pay, never waits behind it, nor does the owner's own reply (lane `own`)
+behind a reply someone else called for, which the others' lanes may keep queued. Claimed again, its owner is told it is running (the other members of a group, who were told it
+is replying, are told nothing more), and its wait is not logged again; each claim starts the run's in-process flags
+afresh, and nothing of an attempt that was held back (its end, its flags) touches the next. The worker is woken after a
+trigger commits, after every run it has worked on ends (so a held-back reply is claimed as the reply it waited for
+settles), after a held-back reply is admitted (the replies behind it may go), after the stale-run sweep or a stop
+releases a run and after a persona draft ends, and also looks every 2 s (another instance's ends). Per run:
 
 1. `begin`, in three steps so that no transaction is open while attachments are read (a failure of the service's own
    in any of them ends the run `failed`, `busy`):
    1. A short transaction under the Agent's lock: a run marked `interrupted` (or a paused or deleted Agent) ends
-      `cancelled`, a stop asked for meanwhile `stopped`, a run in a group its Agent is no longer a current member of
+      `cancelled`, a stop asked for meanwhile `stopped` (kept in the run's row, `stop_asked`, so also one asked while an
+      earlier attempt ran, whatever this process saw of it), a run in a group its Agent is no longer a current member of
       `cancelled`, `agent_removed`. Every call the run answers meets the block rule of a call made now, whatever its
       lane (a call its owner's own call took over, and a retry, included): one whose person has a block with the Agent's
       owner, either way, made since (for an Agent's message: its owner, or the person behind it) is dropped — no longer a
@@ -2888,7 +2919,8 @@ run at a time, and drafts wait for each other on the lock). It is woken after a 
       refused by these — and someone else's meets the others' budget again and is not queued once it is spent (no second
       notice that day); nothing loops. Otherwise the call is admitted holding the most its
       input can cost (Metering, Admission: its text's utf-8 bytes, at most what the context leaves beside the output
-      limit; `no_quota` ends it `failed` before any call), its input estimate and the ratio's key are recorded on the run
+      limit; `no_quota` ends it `failed` before any call; a reply whose hold does not fit beside the owner's other running
+      calls' goes back to `queued` with nothing held, Metering, Money that does not block), its input estimate and the ratio's key are recorded on the run
       for settlement to learn from (Metering, Token estimates), and the Agent's read
       marker moves to what the run covers (`read` push, `peerReadSeq`).
 2. The model call, with no transaction open: deltas go to the owner's sockets, at most one push per 50 ms (`stream.ts`)
@@ -3212,11 +3244,9 @@ marked all the same. A site model's configuration is never changed: one metric l
 `tools_refused_site`). Either way the reply goes on as described here, and from the next reply on a marked model is offered
 none. A later round the upstream refuses (400 or 422 — something in the rounds it will not take, which
 nothing of ours can mend; any other failure fails the reply as it fails one call) is followed, once, by the ordinary call
-— no tools, no rounds, the conversation alone, under the system text of a reply offered none, its cost held first (not
-made when nothing more can be held) — and its
-answer follows what the reply wrote; nothing is marked. `extend` answering that nothing more can be held ends the reply
-with what it wrote, as
-`truncated` (with nothing written: `failed`, `no_quota`). The owner's stop, the reply's time — `TOOLS.runTimeoutMs` in
+— no tools, no rounds, the conversation alone, under the system text of a reply offered none, its cost held first — and its
+answer follows what the reply wrote; nothing is marked. Money never ends a reply that has started: when what is left no longer covers another round, the next
+call is its last (Metering, Extension), made also below zero. The owner's stop, the reply's time — `TOOLS.runTimeoutMs` in
 all, each call and each tool also within `AGENT_RUN_TIMEOUT_MS` — and the service closing are honoured between events,
 between tool calls and between rounds, and end the reply as they end one of one call. What the rounds write streams as it
 comes, a later round's after a paragraph break, and is posted as one reply — but for what the reply said before its
@@ -3356,7 +3386,7 @@ The system text of a reply offered tools asks for it (The three tools).
 | The model stopped at its output limit having only thought (no visible text; reasoning came, or the upstream reported reasoning tokens) | none; the reasoning streamed meanwhile is discarded | `failed`, `thinking_exhausted`, retryable; charged what the upstream reported |
 | The reply could not be stored (or the run started) for the service's own reasons | none | `failed`, `busy`, retryable; charged nothing: the usage record keeps the true cost, all of it forgiven |
 | Nothing left to pay for it | none, no call made | `failed`, `no_quota` |
-| A reply with tools, between its rounds: nothing more can be held for another call (Metering, Extension) | what had been said, `truncated: true` (nothing said: no message) | `done` (nothing said: `failed`, `no_quota`); charged what its rounds used |
+| A reply with tools, between its rounds: what is left no longer covers another round (Metering, Extension) | the reply, its last call made without tools — also below zero | `done`; charged what its rounds and its last call used |
 | The owner had started `AGENT_RUNS_PER_MINUTE` replies in the last minute (recorded by the trigger, or in a group by a follow-up; never queued) | none, no call made, no usage record | `failed`, `rate_limited`, retryable; charged nothing |
 | An empty answer (no visible text, no reasoning; in a group, no visible text) | none | `failed`, `provider_unavailable`; charged only what the upstream reported (a reply with tools: and what its rounds before it used) |
 | Everything it was to answer is before a new topic (started while it was queued, or a retry after one) | none, no call made | `cancelled` with no error, not retryable; charged nothing; what the owner wrote meanwhile gets the follow-up |
@@ -3837,12 +3867,84 @@ than one token a byte, but never more than the model's context leaves beside the
 carries more input (`holdTokens`; whatever the model's ratio: Token estimates), plus 1 500 per image and 300 per KB of
 PDF, plus the call's whole output limit (at a reasoning level, its thinking allowance included: Calling a
 model), at the model's prices. So text an upstream counts at up to a token a byte never costs more than was held. A hold larger than
-the call's cost takes nothing from the owner: the call is charged what it cost, and a larger hold only lets fewer calls
-start at once at the edge of what is left (one starts while what is left after the holds is above zero). A free-tier model is charged to today's
-free allowance while what is left of it, less what your running calls hold against it, is above zero; otherwise to the
-balance, by the same rule; a paid-tier model only to the balance. With neither, the call does not start: `no_quota`
-(402) with `reason` `free_and_balance` and `resetsAt`, or `reason` `balance` (a reply's run fails so; a draft answers
-so). A memory call (purpose `memory`) on a site model is the exception: see "The memory allowance" below. The run records the model it was admitted on with its source and hold, and settlement goes by that, whatever the
+the call's cost takes nothing from the owner: the call is charged what it cost, and a larger hold only makes other
+replies wait at the edge of what is left (below). A free-tier model is charged to today's free allowance while what is
+left of it, less what your running calls hold against it, is above zero; otherwise to the balance, by the same rule; a
+paid-tier model only to the balance (so a reply goes on to the balance when your other calls hold all the allowance, as
+it always has). Only when nothing at all is left of a source the model may use — the allowance used up, the balance at
+or below zero, holds aside — is the call refused: `no_quota` (402) with `reason` `free_and_balance` and `resetsAt`, or
+`reason` `balance` (a reply's run fails so; a draft answers so).
+
+*Money that does not block* (Task H; `tests/money-blocking.test.ts`). A call starts while something is left of its
+source, however large its hold — a reply whose hold is 5 points starts on a balance of 3. What your other running calls
+hold only makes a reply wait: when it starts, the holds against its source, its own included, may add up to at most
+`HOLDS.maxOpenShare` (default 1, so all of) what is left of it, unless the reply would be the only call holding against
+that source — then it starts whatever its hold. A reply that would pass that is *held back*: it is not refused; its run
+goes back to `queued` — its owner is told it is queued, the other members of its group are told nothing (they keep seeing
+it replying: nothing about money reaches anyone else) — with the calls it waits for and the source it waits on
+(`agent_runs.held_back_by`, `held_back_on`, migration 054), and the worker claims it again as soon as one of
+them has ended; until it is admitted, your younger replies paid from the same source wait behind it, first come first
+served (Agents and runs, The worker; a reply on your own provider key, or one the other source pays, does not wait). That
+is decided under your account's lock, which every settlement takes before its run leaves `running`, so a reply is never
+left waiting for a call that has already ended. It stays an ordinary queued reply meanwhile: your stop (also one you
+asked while it was still running: it is kept in the run's row, `agent_runs.stop_asked`, and its next attempt ends
+`stopped`), a pause, a delete, the Agent's leaving end it as any; what it had taken on (your mention noted while it ran) is handed back as noted, so it is answered whatever becomes of
+its next attempt; its next `begin` reads everything again (what it was asked, its asker's line, the model). A persona
+draft never waits (you are waiting for it on the page): it starts while something is left of its source, whatever your
+replies hold, and its hold counts against them like any. *On the free allowance* (the site pays what passes it) a reply
+offered tools holds, from its admission, room for a last call beside its first — **the free allowance's room** — and that
+is the hold the rule above counts, renewed a round at a time (Extension): the room is what a last call made after one
+more round can cost,
+
+    room = cost(min(input + G, C − M + 400 + fixed), M)
+    G    = k × (3 × TOOLS.resultMaxWeight + 200) + 6 × M + 300
+
+where `input` is the bound of the reply's next call's input (at admission its first call's; Admission, Extension), `C`
+the model's context, `M` its output limit (the room holds the whole of it), `fixed` its images and PDFs at their
+constants, 400 what providers add around tool definitions, and `G` the most one more tool round can add to a call, in the
+unit holds count in (a token a byte): `k` results — the calls one reply may run in all, the offered tools' per-reply caps
+summed (`TOOLS.searchPerReply` + `TOOLS.filePerReply` = 10 by default; a tool offered with no cap of its own makes the
+room the whole call) —, each at most 3 × `resultMaxWeight` bytes (a result's weight is ⌈bytes / 3⌉, and results are cut by
+weight) and 200 of framing; the round's own assistant turn and the notes answering calls not run, allowed 6 bytes an
+output token; and 300. Never more than one whole call of the model. *What it bounds, and what it does not:* the last
+call's input is at most the input of the call before it and what that call's round added, so the room covers the last
+call whenever a round adds at most `G`. It does in real tokens; but `G` counts a round in bytes, as holds do, and a round
+can pass it in bytes without passing it in tokens — calls past their caps, repeats and garbled calls, each answered by a
+note (≈ 200–250 bytes for ≈ 8–12 output tokens, and not limited in number within a round); the provider's ids,
+signatures and encrypted reasoning carried in the turn; a result cut to a string and escaped again; long tokens (a run of
+spaces, a JSON escape). Then the last call's hold grows past the room and is raised past what is left, as on the balance
+(Extension) — on Luna (below) by 0.57 points for a round of 8 bytes an output token, 1.72 for 12, and up to 5.1 on a fresh
+conversation for a round spent on ≈ 500 tiny calls past their caps (≈ 107 000 bytes; at most what the context leaves) —,
+which only makes the owner's other replies wait the longer. What is charged is real tokens (re-sending a turn costs about
+its output tokens, whatever its bytes; results run 0.3–0.5 tokens a byte), so the real last call stays inside the room
+unless results made to count near a token a byte, hundreds of note-answered calls in one round and a context far from
+full all come together: the worst constructed in review passes it by ≈ 4 000 tokens, ≈ 0.3 points on Luna, forgiven. *Worked
+example* (the acceptance's free model, Luna: 70 micro-points an input token, 350 an output token, `M` 4 096, `C`
+200 000; a fresh conversation whose first call's input bound is 6 000; `k` 10): `G` = 10 × 9 200 + 24 576 + 300 =
+116 876; the room is 122 876 × 70 + 4 096 × 350 = 10.03 points; the first call's most 6 000 × 70 + 4 096 × 350 = 1.85;
+the reply holds 11.89 (the whole context's room would make it 17.03). At half of a 100-point day, 50 left, four such
+replies start at once (4 × 11.89 = 47.6 ≤ 50; `AGENT_MAX_CONCURRENT_RUNS` is 4), against two with the whole context's
+room. An ordinary one-search reply: its search reported 2 500 in and 300 out (0.28) and brought back 3 000 bytes, so its
+next call's input bound is about 9 500, its most 2.10, the room renewed 10.28, and the hold goes to 0.28 + 2.10 + 10.28 =
+12.66 — two such replies open hold 25.3 of the 50 and both keep their rounds; of four open, three can renew (3 × 12.66 +
+11.89 = 49.87) and the fourth's next call is its last (it would need 12.66 with 12.02 left) — nothing lost for a
+one-search reply, whose next call is its answer, but one that wanted a second search makes do with one. Below 23.8 left a
+second reply waits for the first; below 11.89 a reply starts only alone. *Each further tool offered with a cap of its own*
+adds that cap to `k`, and every result it may bring back is counted whole: with a clock (`current_time`, 1 a reply, its
+answer some 50 bytes) `k` is 11 — `G` 126 076, the room 10.68, the hold 12.53; at 50 left three start at once (4 × 12.53 =
+50.1 > 50), and a second waits below 25.1. *The forgiven overrun* per owner and site day is still at most one reply plus
+one call per open persona draft: a reply that starts beside others fits beside their holds, and every round of it renews
+its room only while it fits (else its next call is the last, made within the room it kept), so only the reply that starts
+alone can pass what is left — by at most its hold less what was left (11.89 − L on Luna above; at worst, a first call on
+a whole context, 15.17 + 15.17 − L; realistically its real cost less L, ≈ 0.84 for one search) —, plus one call for each
+draft open beside it (on Luna ≤ 1.64 each with a 3 000-byte prompt, realistically ≈ 0.1), plus the bytes-not-tokens
+excess above (≲ 0.3 points for each reply open beside it; practically none): on Luna ≤ ≈ 16.8 points in all on a fresh
+conversation (≈ 35 with a whole-context first call), realistically under 1 point. *Worked example (the balance):* a balance of 3 points,
+two Agents of yours called at once on a model whose calls hold 5 each. The first starts (3 is above zero, and it is the
+only call holding against the balance). The second would make the holds 10 against 3: it waits, queued. The first costs
+4: the balance is −1, and the second, claimed again, is refused (`no_quota`) — nothing is left. Had the first cost 1, the
+second would then start alone on the 2 left. With 20 points both run at once (10 ≤ 20). A grant of 10 on the −1 leaves 9.
+A memory call (purpose `memory`) on a site model is the exception: see "The memory allowance" below. The run records the model it was admitted on with its source and hold, and settlement goes by that, whatever the
 Agent's model is by then; it records the reasoning level the call is sent at too (migration 018), for its reply's `via`.
 A reply offered tools holds their definitions too, at their bytes, and 400 tokens for what providers add around them
 (`TOOL_PREAMBLE_TOKENS`).
@@ -3860,18 +3962,23 @@ source — today's free allowance or the balance, by admission's rule, less what
 with this run's own hold added back; never another source than admission chose. In this order: a budget of its lane
 reached by so far counted with what is settled (the Agent's others' daily budget for someone else's call, its proactive
 budget for a reply nobody asked for, and in a group, for a reply in an Agents' chain, its chain budget) allows the last
-call at most; else, while so far and the next call's most stay within `TOOLS.maxPoints` and within *left*, the hold
-becomes that and another round may call tools; else, while *left* is above *so far* (admission's own rule: a call starts
-while something is left), the hold becomes so far and the next call's most — past *left* if it must be, as an admitted
-call's hold may be — and the next call is the last; else nothing changes and no call is made (the reply ends with what it
-wrote, as cut, or `no_quota`). The ordinary call that follows a later round the upstream refused is held the same way, at
-its own most (no tools, no rounds), and is not made when nothing is left after what the reply has spent. So no round
+call at most; else, while so far and the next call's most stay within `TOOLS.maxPoints` and within *left* — on the free
+allowance with the room for a last call after it besides, renewed from the next call's input bound (Admission, the free
+allowance's room) — the hold becomes that and another round may call tools; else the hold becomes so far and the next
+call's most — past *left* if it must be, even below zero (on the free allowance the room kept covers it, so the hold does
+not grow, unless the round passed `G` in bytes: Admission, the free allowance's room) — and the next call is the last: short of the renewed room on the free allowance a reply is never cut or
+queued, its next call is the last. *So far* is never more than the reply has held for its calls (less, on the free
+allowance, the room kept): every call was held at its most
+before it was made, so an upstream that reports more is wrong, and what it reports above that is never held for —
+settlement forgives it (Forgiveness). A reply that has started is never refused for money: short of
+it, it stops calling tools and answers with what it found. The ordinary call that follows a later round the upstream
+refused is held the same way, at its own most (no tools, no rounds), and is made whatever is left. So no round
 after the first is started that could take the reply past `TOOLS.maxPoints`: a reply costs at most the larger of that and
 its first round (which admission alone bounds), and its one last call. A provider's model holds nothing; its rounds, its
 context and its lane's budgets bound it. Whatever the rounds, the reply is settled once, on their sum: every call of it
 was held at its most, so it is charged what it cost (Forgiveness says what can still pass a hold), the free allowance used
-never goes past the day's allowance (what is above is forgiven), and what the holds pass a source by stays under one call's
-most (The debt bound).
+never goes past the day's allowance (what is above is forgiven), and what the holds pass a source by is, per reply, at most
+its last call (The debt bound).
 
 **Settlement** works out what the call cost: the tokens the upstream reported (reasoning counts as output), or, when it
 reported none, the estimate — its input in weight times its model's learned ratio (Token estimates; images and PDFs at
@@ -3963,12 +4070,58 @@ allowance — and recorded as such (`forgiven_micro`):
   true cost), and for a run recovered at start-up (settled on no tokens at all: whatever the upstream reported died with
   the process).
 
-**The debt bound.** However many replies and drafts you start at once, the free overrun forgiven in a day and the debt on
-the balance are each less than one call's maximum cost: admission holds a call's maximum cost against its source
-before the call, under the account lock, and admits only while what is left after the holds is above zero
-(`tests/metering-concurrency.test.ts`: twenty at once, also with every call costing far more than it held). A reply with
-tools holds each of its later calls the same way (Extension): within what is left, or past it only while something is
-left after what the reply has spent, so the holds then pass the source by less than that one call's maximum cost.
+**The debt bound.** However many replies and drafts you start at once — and whatever an upstream reports, since nothing
+is charged above what was held for it (Extension, Forgiveness) — what your calls take a source below zero is bounded, by a
+rule of its own per source:
+
+- *The balance* (concurrency first; the debt is yours, repaid by the next grant before anything else — the ledger sums
+  to the balance): at most what one reply costs, plus one call for each other reply or draft of yours open beside it —
+  that reply's last call, or the draft. Why: every call is held at its most before it is made and charged no more than it
+  held, all under the account lock; a reply starts past what is left only when it is the only call holding against the
+  balance, and only while something is left (so what it costs beyond what was left is less than its whole cost); every
+  other reply starts only with every hold fitting what is left (`HOLDS.maxOpenShare` is at most 1), and each of its later
+  rounds only while its hold still fits beside the others' (Extension), so the one thing it can add past what was left is
+  the last call it makes when it no longer fits; a persona draft starts while something is left whatever is held, one
+  call. And none starts once nothing is left, so the debt never grows past that.
+- *The free allowance* (the site's money: what passes the day's allowance is forgiven, never yours, and the next day's
+  allowance is whole): per reply, a reply that starts beside others never passes what is left — its hold, its last call's
+  room included when it is offered tools, fits beside theirs, and it never costs more than it holds —, so only a reply that
+  starts alone can, by less than its own cost. Per owner and site day: once the allowance is used up nothing more starts
+  on it that day, so what the site forgives you a day is at most one reply's cost, plus one call for each persona draft
+  open at that moment (at most `AGENT_MAX_CONCURRENT_RUNS` calls of yours run at once, drafts included).
+
+`tests/metering-concurrency.test.ts` (twenty replies at once, also with every call costing far more than it held),
+`tests/money-blocking.test.ts` (six tool replies on 3 points of balance, and on the day's 3 free points one at a time with
+at most one reply forgiven; two replies that would each run to `TOOLS.maxPoints` on 6; a round reported at 100 points; the
+free allowance's room at admission and after each round, and the last call within the renewed room when an upstream
+over-reports; four Luna one-search replies at once at half of a 100-point day),
+`tests/money-drafts.test.ts` (eight drafts at once at the end of the allowance).
+
+**Reminders** (`src/metering/reminders.ts`; `tests/money-reminders.test.ts`). When a reply or a persona draft is
+settled, its owner may be told, by a whisper of kind `allowance` with no button, in that Agent's own conversation — after a
+draft, or a reply whose Agent was deleted meanwhile, in the conversation of the Agent they used last (its newest message)
+— (Whispers: only they ever see it, also when the reply was in a group). The reminder is recorded in the settlement's own
+transaction, under the account lock (so a crash cannot lose it), and its whisper is made once that has committed, in a
+transaction of its own that takes the conversation's row and then the Agent's as every whisper does (none of them is
+taken after the account's, which would deadlock with a message or a run holding them). A whisper that cannot be made in
+that conversation (its Agent deleted that moment) is made in the conversation of the owner's Agent used next most
+recently, and so on; one that can be made in none of them is left for the sweep to try again; an owner with no Agent at
+all by then is told nothing, and that is counted (`reminder_no_agent`). A reminder recorded but never made (the service
+stopped between the two) is made by the periodic sweep (`MEMORY.changesSweepMs`, hourly), once, and one of an earlier
+site day is dropped; with `MEMORY.changesSweepMs` 0 there is no periodic sweep, and only `attachments:sweep` (run by
+hand: deploy/README.md) makes what was left. It is said: when the day's free allowance is `ALLOWANCE.warnAt` (default 0.8) used,
+`这个周期的额度已经用了 80%。` (the share as configured); when it is used up and the balance is at or below zero — no reply
+on a free-tier model starts before the site's midnight —, `额度用完了，11月22日 00:00 恢复。` (the date and time it comes back,
+in `SITE_TIMEZONE`, written as the web writes a date — never "明天": the whisper stays for days; nothing about topping up:
+points are only granted by the operator); and when the call took the balance from above zero to zero or below,
+`余额用完了。` — again each time a grant has brought it above zero and a call takes it down again. The first two are said at
+most once each per owner and site day, whatever paid it (`allowance_reminders (owner_id, day, threshold)`, migration 054,
+recorded under the account lock settlement holds, `delivered_at` once made; an owner's earlier days are deleted as a new
+one is recorded); once the
+allowance is used up, its 80 % is not said after; on the settlement that says it is used up, nothing is said of the
+balance beside it. They follow the state, not the one call: what someone else's spending used is told at the next
+settlement. An owner with no Agent left at the settlement has nothing recorded (the next settlement tries again). Counted
+in the log (Metrics in the log), never with an owner, an Agent or an amount.
 
 **Records.** Every call appends one usage record (who, which Agent, which source and model, tokens, whether
 `estimated`, the true cost, and how much of it the allowance, the balance and forgiveness took — the three always add up

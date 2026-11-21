@@ -1569,7 +1569,13 @@ export async function stopRun(t: Tx, ownerId: string, conversationId: string, ru
   );
   const status = rows[0]?.status;
   if (status === undefined) throw notFound();
-  if (status !== "queued") return { stopped: null, running: status === "running" };
+  if (status === "running") {
+    // Kept in the row (`stop_asked`): an attempt that begins after this — the same, or the next after its admission held
+    // it back — ends stopped (port-impl.ts `halted`), whatever this process's flags say.
+    await t.query("update agent_runs set stop_asked = true where id = $1", [runId]);
+    return { stopped: null, running: true };
+  }
+  if (status !== "queued") return { stopped: null, running: false };
   const stopped = await t.query<RunRow>(
     `update agent_runs as r set status = 'stopped', finished_at = now() where r.id = $1 returning ${RUN_COLUMNS}`,
     [runId],

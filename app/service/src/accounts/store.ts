@@ -66,7 +66,12 @@ export function siteDayStart(now: Date, timezone: string, daysBack: number): Dat
 
 /** When the next site day begins, as an instant: what `free.resetsAt` shows. */
 export function nextSiteMidnight(now: Date, timezone: string): Date {
-  return startOfDay(addDays(siteDay(now, timezone), 1), timezone);
+  return midnightAfter(siteDay(now, timezone), timezone);
+}
+
+/** When the site day after `day` (`YYYY-MM-DD`) begins, as an instant. */
+export function midnightAfter(day: string, timezone: string): Date {
+  return startOfDay(addDays(day, 1), timezone);
 }
 
 /** Creates the owner's account (free tier, balance 0) if there is none. Idempotent. */

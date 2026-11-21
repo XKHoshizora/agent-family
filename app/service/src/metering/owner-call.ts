@@ -9,6 +9,7 @@ import { ModelError, type ModelErrorCode, type ModelGateway } from "../models/ga
 import type { Resolved } from "../models/resolve.ts";
 import { KeyUnreadableError } from "../providers/crypto.ts";
 import { admitRun } from "./admit.ts";
+import { deliverReminder, remindInSettlement, type Reminded } from "./reminders.ts";
 import { settle, type Usage } from "./settle.ts";
 import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio } from "./tokens.ts";
 
@@ -39,6 +40,12 @@ export interface OwnerCallDeps {
   log: Pick<FastifyBaseLogger, "error" | "warn">;
   /** The calls this process is working on, by run id (the stale-run sweep leaves them alone). */
   inFlight: Set<string>;
+  /**
+   * A persona draft's settlement may call for a reminder about money (reminders.ts): recorded in its transaction, its
+   * whisper made after commit in the conversation of the Agent its owner used last, and told here, to push and count.
+   * None: nobody is told (it is made all the same).
+   */
+  reminded?: (reminder: Reminded) => void;
 }
 
 export interface OwnerCallSpec {
@@ -191,6 +198,7 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
           : ({ status: "done" } as const);
     const outputChars = end.status === "done" ? estimateTokens(text) + estimateTokens(reasoning) : 0;
     let endedElsewhere: string | null = null;
+    let reminder: string | null = null;
     try {
       await db.tx(async (t) => {
         // The run row first (the order `settle` keeps): one that is no longer running was ended elsewhere meanwhile —
@@ -200,7 +208,11 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
           endedElsewhere = now.rows[0]?.status ?? "gone";
           return;
         }
-        await settle(t, config, started.runId, finished?.usage ?? null, { inputChars: started.input, outputChars }, end.status, new Date(), { forgiveAll: abandoned, log });
+        const settledAt = new Date();
+        const settled = await settle(t, config, started.runId, finished?.usage ?? null, { inputChars: started.input, outputChars }, end.status, settledAt, { forgiveAll: abandoned, log });
+        // A draft's spending may call for a reminder about money, in the same transaction (a memory call's never does:
+        // it is the site's own allowance).
+        if (spec.purpose === "draft") reminder = await remindInSettlement(t, config, ownerId, settled, settledAt, null);
         await t.query("update agent_runs set status = $2, error = $3, finished_at = now() where id = $1", [
           started.runId,
           end.status,
@@ -212,6 +224,14 @@ export async function ownerCall(deps: OwnerCallDeps, spec: OwnerCallSpec, closin
       // releases it.
       log.error({ err: error, runId: started.runId }, `${label}: could not be settled; the run stays running until the stale-run sweep or the next start releases it`);
       return { kind: "unsettled", error };
+    }
+    if (reminder !== null) {
+      // Its whisper, after commit, with the whisper's own locks; should this fail, the periodic sweep makes it.
+      const reminded = await deliverReminder(db, config, reminder).catch((err: unknown) => {
+        log.error({ err, runId: started.runId }, `${label}: its owner's reminder about money could not be made now; the periodic sweep makes it`);
+        return null;
+      });
+      if (reminded) deps.reminded?.(reminded);
     }
     return {
       kind: "ended",
