@@ -493,10 +493,7 @@ test("a time round: 正在看时间…, then the answer; the clock leaves no lin
   for (const frame of frames) for (const key of ['"found"', '"queries"', '"cites"']) expect(frame.includes(key), `${key} in ${frame.slice(0, 200)}`).toBe(false);
 });
 
-// --- 7. known product issues (the controller's list): written, not run until fixed ----------------------------------------------
-
-/** `E2E_RUN_FIXME=1` runs these to see them fail; otherwise they are skipped (`test.fixme`). */
-const known = process.env.E2E_RUN_FIXME === "1" ? test : test.fixme;
+// --- 7. citations in the list preview and as links (once known product issues, fixed) ------------------------------------------
 
 /** A group of Ann, Bo and Cy with the Agent, and an answer of it citing a message of the group: `{ann, title, tag}`. */
 async function citedAnswerWorld(people) {
@@ -521,15 +518,28 @@ async function citedAnswerWorld(people) {
   return { ann, title, tag };
 }
 
-known("the conversation list's preview of a cited answer shows no raw 〔m1〕 token to the owner (FIXME product: the preview prints the token as written)", async ({ people }) => {
+test("the conversation list's preview of a cited answer shows no raw 〔m1〕 token to the owner", async ({ people }) => {
   const { ann, title, tag } = await citedAnswerWorld(people);
   const preview = listRow(ann.page, title).first().locator(".row-preview");
   await expect(preview).toContainText(tag);
   await expect(preview).not.toContainText("〔m1〕");
 });
 
-known("the citation link has a clickable box of at least the text's line height (FIXME product: .cite > button inherits line-height 0, so its box is 0 high)", async ({ people }) => {
+test("the citation link is a real box: taller than nothing and a sensible part of the text's line height", async ({ people }) => {
   const { ann, title, tag } = await citedAnswerWorld(people);
-  const link = agentMessagesWith(chatPane(ann.page, title), "周五晚上七点吃火锅").filter({ hasText: tag }).getByRole("button", { name: "引用 1" });
-  await expect.poll(async () => (await link.evaluate((b) => b.getBoundingClientRect().height).catch(() => 0)) > 0, { message: "the link's box has height" }).toBe(true);
+  const reply = agentMessagesWith(chatPane(ann.page, title), "周五晚上七点吃火锅").filter({ hasText: tag });
+  const link = reply.getByRole("button", { name: "引用 1" });
+  await expect(link).toBeVisible();
+  // The reply as rendered Markdown (the tree replaces the plain text a moment after it is shown): that is the state measured.
+  await expect(reply.locator(".md-text .md")).toHaveCount(1);
+  const { box, line } = await link.evaluate((b) => {
+    const text = b.closest(".md-text") ?? b.parentElement;
+    const style = getComputedStyle(text);
+    const px = Number.parseFloat(style.lineHeight);
+    return { box: b.getBoundingClientRect().height, line: Number.isFinite(px) ? px : Number.parseFloat(style.fontSize) * 1.2 };
+  });
+  expect(box, "the link's box height").toBeGreaterThan(0);
+  expect(box, `the link's box height against a text line of ${line}px`).toBeGreaterThanOrEqual(line * 0.5);
+  // And it is clickable where it is drawn (the click lands on it, not through it).
+  await link.click({ trial: true });
 });
