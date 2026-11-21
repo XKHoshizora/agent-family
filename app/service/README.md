@@ -1484,7 +1484,16 @@ sweep ended it, you stopped it (queued or under way), or your pause cancelled it
 `告诉他们` tells once more (a fresh told reply) or `不用` declines (`whispers/store.ts` `afterTell`). Not when it posted (it
 stays `accepted`; one open again since, its run retried, is answered again when that posts), nor when you or the Agent
 are no longer in the group, the Agent is deleted, or you have 3 `found_elsewhere` whispers open there already (a reopened
-one counts); once reopened, any other ending of it changes nothing. Stopping a told reply while it is queued ends the
+one counts); once reopened, any other ending of it changes nothing, and only the whisper's latest told reply decides (an
+earlier one's end does nothing once you told it again). A known limit: over that cap the bubble reads 已告诉他们 though
+nothing was posted, until room is made and the periodic sweep (below) gives it back. A whisper with no hit left to tell is
+not given back to be pressed in vain: it is closed as gone stale (`expired`, 已过期). A given-back whisper keeps its
+`createdAt` (and so its place, and the 7 days it may stay open count from when it was made — kept so, since a newer
+`createdAt` would also count as one more made by the next reply, which may make one at most). The periodic sweep on the
+memory changes' timer (`MEMORY.changesSweepMs`) is the safety net: a told reply that ended between a minute and a day ago
+without posting, the latest of its whisper's, whose whisper is still `accepted` — its give-back lost (the process stopped
+between a pause's commit and the give-back after it) or held by the cap — is given it again (`repairTells`), pushed to you
+alone. Stopping a told reply while it is queued ends the
 tell only: the members' calls noted on it still get their ordinary follow-up. (`让 Agent 停下`, a group member's halt, does
 not touch a told reply at all — it is your own, a person's call: it ends the runs Agents' messages called for and the
 replies nobody asked for, and a follow-up of noted calls that only Agents' messages made is such a run.) A retry of a told
