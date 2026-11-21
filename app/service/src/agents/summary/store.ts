@@ -2,6 +2,7 @@ import { VISIBLE_JOIN } from "../../conversations/store.ts";
 import type { Queryable } from "../../db.ts";
 import { notAcknowledgement, type AttachmentRef } from "../../messages/model.ts";
 import { postingRun } from "../../messages/read.ts";
+import { handleOf } from "../../principals/store.ts";
 
 /**
  * The rolling summary's rows (migration 052; README "The rolling summary"): one per conversation and Agent. What reads it
@@ -51,11 +52,11 @@ export async function countPlaced(q: Queryable, r: PlacedReader, after: number, 
   return rows[0]?.n ?? 0;
 }
 
-/** Everyone `r` reads a message of whose place is after `after` and at most `upto`: their name, handle and kind, each once. */
+/** Everyone `r` reads a message of whose place is after `after` and at most `upto`: their name, handle (as everyone is shown it, `handleOf`: an Agent's is `owner.name`) and kind, each once. */
 export async function placedSpeakers(q: Queryable, r: PlacedReader, after: number, upto: number): Promise<Array<{ id: string; name: string; handle: string; kind: "human" | "agent" }>> {
   if (upto <= after) return [];
   const { rows } = await q.query<{ id: string; name: string; handle: string; kind: "human" | "agent" }>(
-    `select distinct sp.id, sp.display_name as name, sp.handle::text as handle, sp.kind
+    `select distinct sp.id, sp.display_name as name, ${handleOf("sp")} as handle, sp.kind
        ${PLACED_FROM}
        join principals sp on sp.id = m.sender_id
       ${PLACED_WHERE}`,
@@ -64,7 +65,7 @@ export async function placedSpeakers(q: Queryable, r: PlacedReader, after: numbe
   return rows;
 }
 
-/** A message as a summary reads it: its place, who sent it (their name, handle and kind), its text and its attachment. */
+/** A message as a summary reads it: its place, who sent it (their name, handle as `placedSpeakers` reads it, and kind), its text and its attachment. */
 export interface PlacedMessage {
   at: number;
   seq: number;
@@ -80,7 +81,7 @@ export interface PlacedMessage {
 export async function readPlaced(q: Queryable, r: PlacedReader, after: number, upto: number, limit: number): Promise<PlacedMessage[]> {
   if (upto <= after) return [];
   const { rows } = await q.query<{ at: string; seq: string; sender_id: string; name: string; handle: string; kind: "human" | "agent"; text: string | null; attachment: AttachmentRef | null }>(
-    `select coalesce(r.covers_seq, m.seq)::text as at, m.seq::text as seq, m.sender_id, sp.display_name as name, sp.handle::text as handle, sp.kind,
+    `select coalesce(r.covers_seq, m.seq)::text as at, m.seq::text as seq, m.sender_id, sp.display_name as name, ${handleOf("sp")} as handle, sp.kind,
             m.body ->> 'text' as text, m.body -> 'attachment' as attachment
        ${PLACED_FROM}
        join principals sp on sp.id = m.sender_id

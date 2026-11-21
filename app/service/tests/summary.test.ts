@@ -893,6 +893,37 @@ describe("tidy round", () => {
   });
 });
 
+// --- the final review -------------------------------------------------------------------------------------------------
+
+/** The input's messages of `call` (a summary call). */
+const inputOf = (call: ModelCall): Array<{ who: string; role?: string; text: string }> => JSON.parse((call.messages[0]!.parts[0] as { text: string }).text).messages;
+
+describe("final review", () => {
+  it("I-2: an Agent is labelled by its full handle (owner.name); one whose name part and name copy a member's handle and name gets a label of its own, and its words stay its own", async () => {
+    const [v, m, n] = [await signUp(app, "fav"), await signUp(app, "fam"), await signUp(app, "fan")];
+    const g = await group(app, v, "撞名群", [m, n]);
+    const agent = await mustCreateAgent(app, v, { handle: "fa_bot", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(v, g, agent.id);
+    // fan's Agent, named as fam is and with fam's handle for its name part (a separate pool: allowed).
+    const copy = await mustCreateAgent(app, n, { handle: "fam", name: "fam", model: SMALL, persona: "你说话简短。", memory: false });
+    await addMember(n, g, copy.id);
+    const seqs = await seed(g, [v.id, m.id, copy.id], Array.from({ length: 120 }, (_, i) => short(i)));
+    expect(seqs).toHaveLength(120);
+    await say(v, g, "@fa_bot 说到哪了");
+    const answer = ["人物与称呼", "fam（@fam）是群成员", "fam（@fan.fam）是 fan 的助手", "说过的事", "fam（@fan.fam）答应周六请客", "定下的事", "还没解决的"].join("\n");
+    await reply("好。", answer);
+    const input = inputOf(summaryCalls()[0]!);
+    const byText = new Map(input.map((l) => [l.text, l]));
+    expect(byText.get(short(1))).toEqual({ who: "fam（@fam）", role: "群成员", text: short(1) });
+    expect(byText.get(short(2))).toEqual({ who: "fam（@fan.fam）", role: "Agent", text: short(2) });
+    // Both labels are ones the system wrote: every line is kept, the Agent's words under its own label.
+    expect((await summaryOf(g, agent.id))!.text).toBe(answer);
+    expect(await counted("summary_label_dropped")).toBe(0);
+    // And the roster names it by that same label.
+    expect(replyCalls()[0]!.system).toContain("fam（@fan.fam）");
+  });
+});
+
 describe("the summary's text", () => {
   it("the reply's passage: the fixed heading, then the text as one JSON string", async () => {
     const { summaryPassage } = await import("../src/agents/runtime/prompt.ts");
