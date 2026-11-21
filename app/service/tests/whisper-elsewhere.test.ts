@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createAgentPort, recoverRuns, sweepStaleRuns } from "../src/agents/port-impl.ts";
-import { createWhisper } from "../src/whispers/store.ts";
+import { afterTell, afterTellsEnded, createWhisper } from "../src/whispers/store.ts";
+import { changeSweep } from "../src/app.ts";
 import { NO_TOOLS, TOLD_NO_TOOLS, TOOL_MATERIAL } from "../src/agents/runtime/prompt.ts";
 import { createAgentWorker, type AgentWorker } from "../src/agents/runtime/worker.ts";
-import { createElsewhere, ELSEWHERE_HITS_MAX, FOUND_ELSEWHERE, TELL_HOW, TELL_THEM, TOLD_TURN, type ElsewhereDeps, type ElsewhereHook } from "../src/agents/tools/elsewhere.ts";
+import { createElsewhere, ELSEWHERE_HITS_MAX, ELSEWHERE_OPEN_MAX, FOUND_ELSEWHERE, TELL_HOW, TELL_THEM, TOLD_TURN, type ElsewhereDeps, type ElsewhereHook } from "../src/agents/tools/elsewhere.ts";
 import { RunRefs } from "../src/agents/tools/refs.ts";
 import { createToolbox, SEARCH_MESSAGES, type ToolDeps } from "../src/agents/tools/index.ts";
 import type { Db } from "../src/db.ts";
@@ -707,7 +708,59 @@ describe("a tell is never lost (round 3)", () => {
     const ticket = (await app.agentPort.claimNext())!;
     expect((await api(app, x.w.owner, "DELETE", `/api/conversations/${x.w.g}/members/${x.w.owner.id}`)).status).toBe(200);
     await app.agentPort.releaseRun(ticket.id);
-    expect(await whisperStatus(x.whisper.id)).not.toBe("open");
+    // Still answered: a leaving expires only open whispers, and the give-back refuses an owner no longer there.
+    expect(await whisperStatus(x.whisper.id)).toBe("accepted");
+  });
+
+  it("round 4, I-1: the give-back after a pause catches a failure per run — the others still go, and what changed is still returned (to push); the log names no content", async () => {
+    const x = await toldQueued();
+    // As the pause's own transaction leaves it: cancelled, its whisper still answered.
+    await db.query("update agent_runs set status = 'cancelled', error = 'agent_paused', finished_at = now() where id = $1", [x.told.id]);
+    const logged: unknown[] = [];
+    const log = { error: (obj: unknown) => void logged.push(obj) };
+    const given = await afterTellsEnded(app.deps.db, ["00000000-0000-0000-0000-00000000zzzz", x.told.id], ELSEWHERE_OPEN_MAX, log);
+    expect(given.map((g) => [g.id, g.status])).toEqual([[x.whisper.id, "open"]]);
+    expect(logged).toHaveLength(1);
+    expect(JSON.stringify(logged)).not.toContain(CANARY);
+  });
+
+  it("round 4, I-1: the periodic sweep repairs a tell whose give-back never ran (the process stopped between the two): open again, pushed to its owner alone; only for an ending between a minute and a day ago", async () => {
+    const x = await toldQueued();
+    // The cancel committed; the give-back after it never ran.
+    const ended = (ago: string) => db.query(`update agent_runs set status = 'cancelled', error = 'agent_paused', finished_at = now() - interval '${ago}' where id = $1`, [x.told.id]);
+    // Not yet (under a minute: its own give-back may still be on its way), nor any more (over a day).
+    for (const ago of ["10 seconds", "2 days"]) {
+      await ended(ago);
+      await changeSweep(app.deps, app.deps.config, app.log, app.realtime);
+      expect([ago, await whisperStatus(x.whisper.id)]).toEqual([ago, "accepted"]);
+    }
+    // Two minutes ago: given back.
+    await ended("2 minutes");
+    await changeSweep(app.deps, app.deps.config, app.log, app.realtime);
+    await reopenedForOwnerOnly(x);
+    // Idempotent: the next sweep changes nothing more (it is answered again by now, and its told run is no longer the latest).
+    await changeSweep(app.deps, app.deps.config, app.log, app.realtime);
+    expect(await whisperStatus(x.whisper.id)).toBe("accepted");
+  });
+
+  it("round 4, M-1: only the whisper's latest told run gives it back — an earlier one ended without posting does not, once a newer tell was made", async () => {
+    const x = await toldQueued();
+    gateway.fail("provider_unavailable", { status: 502 });
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect(await whisperStatus(x.whisper.id)).toBe("open");
+    // Told once more: a newer run, the whisper answered again.
+    expect((await api(app, x.w.owner, "POST", `/api/whispers/${x.whisper.id}/accept`)).status).toBe(200);
+    expect(await db.tx((t) => afterTell(t, x.told.id, false, ELSEWHERE_OPEN_MAX))).toBeNull();
+    expect(await whisperStatus(x.whisper.id)).toBe("accepted");
+  });
+
+  it("round 4, M-3: a tell with no hits left to tell does not loop — its whisper closes (expired, as one gone stale) instead of opening again", async () => {
+    const x = await toldQueued();
+    await db.query("update whispers set body = jsonb_set(body, '{detail,hits}', '[]'::jsonb) where id = $1", [x.whisper.id]);
+    expect(await app.agentWorker.runOnce()).toBe(true);
+    expect((await runsOf(x.w.agent.id, x.w.g)).find((r) => r.id === x.told.id)!.status).toBe("cancelled");
+    expect(await whisperStatus(x.whisper.id)).toBe("expired");
+    await x.sockets.owner.waitFor((e) => e.type === "whisper" && e.whisper.id === x.whisper.id && e.whisper.status === "expired");
   });
 });
 

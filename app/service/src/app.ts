@@ -1,5 +1,5 @@
 import rateLimit from "@fastify/rate-limit";
-import Fastify, { type FastifyInstance, type FastifyRequest, type FastifySchema } from "fastify";
+import Fastify, { type FastifyBaseLogger, type FastifyInstance, type FastifyRequest, type FastifySchema } from "fastify";
 import {
   serializerCompiler,
   validatorCompiler,
@@ -62,7 +62,8 @@ import type { Hub } from "./sync/hub.ts";
 import { registerSync } from "./sync/routes.ts";
 import { registerWebClient } from "./web.ts";
 import { pushWhispers, registerWhisperRoutes } from "./whispers/routes.ts";
-import { expireWhispers, removeOldWhispers } from "./whispers/store.ts";
+import { expireWhispers, removeOldWhispers, repairTells } from "./whispers/store.ts";
+import { ELSEWHERE_OPEN_MAX } from "./agents/tools/elsewhere.ts";
 import { deliverReminders } from "./metering/reminders.ts";
 
 /** Everything the app needs from outside; tests override pieces (e.g. raised rate limits). */
@@ -182,6 +183,38 @@ export interface BuildOptions {
  * A URL as it may be logged: without its query string, which carries WebSocket tickets, e-mail
  * verification tokens and search terms. Only `?[redacted]` shows that there was one.
  */
+/**
+ * One run of the sweep on the memory changes' timer (`MEMORY.changesSweepMs`). Each step's failure is logged (a code, never a
+ * note or a whisper) and the next goes on:
+ * - the record of what memory changed, kept 30 days (memory/sweep.ts);
+ * - whispers left open 7 days expire (whispers/store.ts), each pushed to its owner (never logged); answered and expired
+ *   ones made 30 days ago are deleted;
+ * - reminders about money recorded by a settlement whose whisper was never made (the service stopped between the two) are
+ *   made, pushed and counted (metering/reminders.ts `deliverReminders`);
+ * - told replies that ended without posting and whose whisper is still answered get it back (whispers/store.ts
+ *   `repairTells`: a give-back lost between two transactions, or one the cap held; round 4, I-1), pushed to its owner.
+ * `hub` null: nobody to tell yet.
+ */
+export async function changeSweep(deps: Pick<Deps, "db">, config: Config, log: FastifyBaseLogger, hub: Pick<Hub, "pushWhisper"> | null): Promise<{ unsent: number; abandoned: number }> {
+  await sweepMemoryChanges(deps.db).catch((err: unknown) => log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
+  const expired = await expireWhispers(deps.db).catch((err: unknown) => {
+    log.warn({ code: (err as { code?: string }).code }, "whisper sweep failed; trying again next interval");
+    return [];
+  });
+  await removeOldWhispers(deps.db).catch((err: unknown) => log.warn({ code: (err as { code?: string }).code }, "whisper clean-up failed; trying again next interval"));
+  const reminded = await deliverReminders(deps.db, config, log).catch((err: unknown) => {
+    log.warn({ code: (err as { code?: string }).code }, "reminder sweep failed; trying again next interval");
+    return [];
+  });
+  for (const r of reminded) log.info({ metric: r.metric }, "a reminder about money was made for its owner");
+  const given = await repairTells(deps.db, ELSEWHERE_OPEN_MAX, log).catch((err: unknown) => {
+    log.warn({ code: (err as { code?: string }).code }, "told replies' whispers repair failed; trying again next interval");
+    return [];
+  });
+  if (hub) pushWhispers(hub, [...expired, ...reminded.flatMap((r) => (r.whisper ? [r.whisper] : [])), ...given]);
+  return { unsent: 0, abandoned: 0 };
+}
+
 export function redactQuery(url: string): string {
   const q = url.indexOf("?");
   return q < 0 ? url : `${url.slice(0, q)}?[redacted]`;
@@ -314,28 +347,10 @@ export async function buildApp(overrides: Partial<Deps> = {}, options: BuildOpti
   });
   if (sweeper) app.addHook("onClose", async () => sweeper.stop());
   // The record of what memory changed is kept 30 days (memory/sweep.ts): its own timer, every `MEMORY.changesSweepMs` (0: none), so that it
-  // runs whether or not the attachment sweep is switched off and whatever that sweep does. A failure is logged (a code, never a note).
-  // Whispers left open 7 days expire on the same timer (whispers/store.ts), each pushed to its owner (never logged); answered
-  // and expired ones made 30 days ago are deleted. Reminders about money recorded by a settlement whose whisper was never
-  // made (the service stopped between the two) are made, pushed and counted (metering/reminders.ts `deliverReminders`).
+  // runs whether or not the attachment sweep is switched off and whatever that sweep does (`changeSweep`).
   const changeSweeper = startSweeper({
-    run: async () => {
-      await sweepMemoryChanges(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "memory change sweep failed; trying again next interval"));
-      const expired = await expireWhispers(deps.db).catch((err: unknown) => {
-        app.log.warn({ code: (err as { code?: string }).code }, "whisper sweep failed; trying again next interval");
-        return [];
-      });
-      await removeOldWhispers(deps.db).catch((err: unknown) => app.log.warn({ code: (err as { code?: string }).code }, "whisper clean-up failed; trying again next interval"));
-      const reminded = await deliverReminders(deps.db, config, app.log).catch((err: unknown) => {
-        app.log.warn({ code: (err as { code?: string }).code }, "reminder sweep failed; trying again next interval");
-        return [];
-      });
-      for (const r of reminded) app.log.info({ metric: r.metric }, "a reminder about money was made for its owner");
-      // (The hub is decorated once the app is built; a run before that has nobody to tell.)
-      const hub = app.hasDecorator("realtime") ? app.realtime : null;
-      if (hub) pushWhispers(hub, [...expired, ...reminded.flatMap((r) => (r.whisper ? [r.whisper] : []))]);
-      return { unsent: 0, abandoned: 0 };
-    },
+    // (The hub is decorated once the app is built; a run before that has nobody to tell.)
+    run: () => changeSweep(deps, config, app.log, app.hasDecorator("realtime") ? app.realtime : null),
     intervalMinutes: config.memory.changesSweepMs / 60_000,
     ...(options.sweepInitialDelayMs === undefined ? {} : { initialDelayMs: options.sweepInitialDelayMs }),
     log: app.log,
