@@ -3384,8 +3384,10 @@ acknowledgement, it quotes the question it answers (`replyToSeq`: the seq the ru
 Everything else belongs to the one reply: one run, one hold, one settlement, its status, `正在回复…` (the web keeps the
 reply shown as being written: an acknowledgement is never taken for the reply), `via` on the answer only. Stopped after
 its acknowledgement, the acknowledgement stays and the run ends as a stopped reply does (nothing more said: `stopped`,
-no further message); a reply that then can hold nothing more, times out or fails having written nothing after it ends
-as one that wrote nothing (`no_quota`, `provider_unavailable`, …), its acknowledgement still there. A retry of it (or
+no further message); a reply that then times out or fails having written nothing after it ends as one that wrote nothing
+(`provider_unavailable`, …), and one ended elsewhere meanwhile (recovery, the stale-run sweep) is left as that recorded
+it — its acknowledgement still there either way. (Money never stops it: a further round whose cost no longer fits is not
+offered, and the reply makes its last call all the same: Metering, Extension.) A retry of it (or
 any later run answering the same question — the run's `covers_seq`, or one of its `call_seqs` — while no reply of the
 acknowledging run was posted: `conversation.ts` `standingAcknowledgement`) posts no second acknowledgement: the earlier
 one stands, and the answer quotes the question when anyone else wrote after that one. An acknowledgement is the Agent's
