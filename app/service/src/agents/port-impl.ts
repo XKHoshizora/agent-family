@@ -8,7 +8,7 @@ import type { Db, Tx } from "../db.ts";
 import { AppError } from "../errors.ts";
 import { admitRun, HeldBack, raiseHold, type ChargeTo } from "../metering/admit.ts";
 import { assertCount, costMicro, isCount, maxCostMicro, type Price } from "../metering/prices.ts";
-import { remindInSettlement, type Reminded } from "../metering/reminders.ts";
+import { deliverReminder, remindInSettlement } from "../metering/reminders.ts";
 import { settle } from "../metering/settle.ts";
 import { correctedEstimate, estimateTokens, holdTokens, planRatio, ratioKey, readRatio, TOOL_PREAMBLE_TOKENS } from "../metering/tokens.ts";
 import { loadNotes } from "../memory/passage.ts";
@@ -135,11 +135,25 @@ interface RunMoney {
   /** The call's output limit, which every call of the reply is held for whole. */
   maxOutputTokens: number;
   /**
-   * The room the reply holds on the free allowance for its last call (admission's `reserveMicro`; 0 on the balance):
-   * every round before the last keeps it, so the last call is made within the hold.
+   * The room the reply holds on the free allowance for a last call after its next round (admission's `reserveMicro`, then
+   * renewed by each "ok" of `extend`; 0 on the balance): every round before the last keeps it, so the last call is made
+   * within the hold (README "Metering", The free allowance's room).
    */
   reserveMicro: bigint;
+  /** The most input one call of the reply can carry, in tokens: its model's context less its output limit, what providers add around tool definitions, its images and PDFs. */
+  roomCapTokens: number;
+  /** The most one more tool round can add to the next call's input, in tokens (`roomGrowth`). */
+  growthTokens: number;
 }
+
+/**
+ * The most one more tool round can add to the next call's input, in the unit holds are counted in (a token a byte):
+ * `k` results — the calls one reply may run in all, each result at most 3 × `resultMaxWeight` bytes (weight is
+ * ⌈bytes / 3⌉, and results are cut by weight) and 200 of framing (its id, its name, its JSON) — and the round's own turn
+ * with the notes answering calls not run, at most 6 bytes an output token of `maxOutputTokens`, and 300. What the room
+ * for the last call is renewed by (`begin`, `extend`).
+ */
+const roomGrowth = (k: number, resultMaxWeight: number, maxOutputTokens: number): number => k * (3 * resultMaxWeight + 200) + 6 * maxOutputTokens + 300;
 
 /** Everything the reply was to answer is before a new topic its owner started: nothing failed, nothing to retry. */
 const STARTED_OVER: RunEnd = { status: "cancelled" };
@@ -182,8 +196,10 @@ interface RunState {
   lane: Lane;
   /** It was held back at an earlier attempt and is not admitted yet (`held_back_by`). */
   marked: boolean;
+  /** Its owner asked it to stop while it ran (runs.ts `stopRun`). */
+  stop_asked: boolean;
 }
-const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane, held_back_by is not null as marked";
+const RUN_STATE = "status, covers_seq::text, pending_seq::text, interrupted, lane, held_back_by is not null as marked, stop_asked";
 
 /**
  * The one rule for a follow-up (README "Agents and runs", Coalescing): a run that has ended is followed by a reply to
@@ -293,17 +309,17 @@ export class DbAgentPort implements AgentPort {
     if (a.run.status === "queued") this.wakeWorker();
   }
 
-  /** The owner asked a running run to stop. */
+  /** The owner asked a running run to stop: the attempt this process works on, if any (no flags are made for another). */
   requestStop(runId: string): void {
-    this.flagsOf(runId).stop = true;
+    const flags = this.flags.get(runId);
+    if (flags) flags.stop = true;
   }
 
   /**
-   * The stop route's step after its transaction found the run `running` (runs.ts `stopRun`): `requestStop`, then — since
-   * its admission may have held it back to `queued` meanwhile, before the flag was set, and a queued run's worker reads no
-   * flag — a queued run is stopped at once, as a stop of a queued run always is, and its owner told. Its row alone is
-   * locked (a statement of its own), after the stop's transaction committed; a run that runs again meanwhile is stopped by
-   * the flag.
+   * The stop route's step after its transaction found the run `running` and kept the stop in its row (runs.ts `stopRun`,
+   * `stop_asked`): `requestStop`, then a run its admission held back to `queued` meanwhile is stopped at once, as a stop of
+   * a queued run always is, and its owner told. Its row alone is locked (a statement of its own), after the stop's
+   * transaction committed. A run claimed again meanwhile ends stopped at its `begin` (`halted` reads the row).
    */
   async stopAsked(runId: string): Promise<void> {
     this.requestStop(runId);
@@ -339,10 +355,12 @@ export class DbAgentPort implements AgentPort {
   /**
    * `AgentPort.claimNext`. A reply held back at admission (`HELD_BACK`; its mark `held_back_by`, `held_back_on`, kept until
    * it is admitted) waits while every call it was held back behind is still running. Until it is admitted — queued, or
-   * claimed again and not admitted yet — the owner's younger replies that would be paid from the same source wait behind it
-   * (first come, first served per payer and source, so a reply with a large hold is not passed for ever by smaller ones);
-   * a reply on the owner's own provider key, or one the other source would pay, does not. Which source a queued reply would
-   * be paid from is admission's own rule (metering/admit.ts) on what its owner has now, read here. Each claim starts the
+   * claimed again and not admitted yet — the owner's younger replies that would be paid from the same source (either, for
+   * a mark of `any`) wait behind it (first come, first served per payer and source, so a reply with a large hold is not
+   * passed for ever by smaller ones); a reply on the owner's own provider key, or one the other source would pay, does
+   * not, nor does the owner's own reply (lane `own`) behind one someone else called for, which the others' lanes may keep
+   * queued. Which source a queued reply would be paid from is admission's own rule (metering/admit.ts) on what its owner
+   * has now, read here. Each claim starts the
    * run's flags afresh. A first claim is announced (`announce`) and its wait logged (`run_wait_ms`, once per reply); a
    * reply claimed again after it was held back is told to its owner alone — the other members of a group, who were told it
    * is replying, are told nothing more.
@@ -381,7 +399,8 @@ export class DbAgentPort implements AgentPort {
                              where o.owner_id = q.owner_id and o.purpose = 'reply' and o.held_back_on is not null
                                and (o.status = 'queued' or (o.status = 'running' and o.source is null))
                                and (o.created_at, o.id) < (q.created_at, q.id)
-                               and o.held_back_on = ${sourceOfQ})
+                               and (q.lane <> 'own' or o.lane = 'own')
+                               and (o.held_back_on = ${sourceOfQ} or (o.held_back_on = 'any' and ${sourceOfQ} is not null)))
           order by q.created_at, q.id
           limit 1
           for update of q skip locked
@@ -429,7 +448,7 @@ export class DbAgentPort implements AgentPort {
     if (state.interrupted) return { status: "cancelled", error: state.interrupted };
     if (agent.deleted) return { status: "cancelled", error: "agent_deleted" };
     if (agent.paused) return { status: "cancelled", error: "agent_paused" };
-    if (this.shouldStop(run)) return { status: "stopped" };
+    if (state.stop_asked || this.shouldStop(run)) return { status: "stopped" };
     return null;
   }
 
@@ -658,11 +677,20 @@ export class DbAgentPort implements AgentPort {
       // The input as the model is expected to count it: its text times the model's learned ratio (1 until it has learned;
       // read in step 1), images and PDFs at their constants. What settlement falls back on when no usage is reported.
       const input = correctedEstimate(context.inputTokensEstimate, context.fixedTokens, ratio);
-      // On the free allowance a reply offered tools holds room for its last call too (admit.ts): the most one call of its
-      // model can cost — its whole context beside its output limit, what providers add around tool definitions, its images
-      // and PDFs — and its whole output.
-      const lastCall =
-        tools.length === 0 ? 0n : maxCostMicro(resolved, Math.max(0, resolved.contextTokens - resolved.call.maxOutputTokens) + TOOL_PREAMBLE_TOKENS + context.fixedTokens);
+      // On the free allowance a reply offered tools holds room for its last call too (admit.ts): what a last call after one
+      // more round can cost — this call's input bound and what one round can add (`roomGrowth`), never more than one call
+      // of its model can carry (its context beside its output limit, what providers add around tool definitions, its images
+      // and PDFs) — and its whole output. Renewed a round at a time (`extend`).
+      const roomCapTokens = Math.max(0, resolved.contextTokens - resolved.call.maxOutputTokens) + TOOL_PREAMBLE_TOKENS + context.fixedTokens;
+      // (A tool offered with no cap of its own has only the round cap: what one round brings back is not bounded below the
+      // whole of a call, so the room is that.)
+      const growthTokens =
+        offer === null
+          ? 0
+          : offer.tools.every((tool) => Object.hasOwn(offer.perTool, tool.name))
+            ? roomGrowth(Object.values(offer.perTool).reduce((sum, n) => sum + n, 0), config.tools.resultMaxWeight, resolved.call.maxOutputTokens)
+            : roomCapTokens;
+      const lastCall = tools.length === 0 ? 0n : maxCostMicro(resolved, Math.min(held + growthTokens, roomCapTokens));
       let admission;
       try {
         admission = await admitRun(t, config, run.id, run.ownerId, resolved, held, now, lastCall);
@@ -723,7 +751,7 @@ export class DbAgentPort implements AgentPort {
                 },
         },
         read: marked && marked.readSeq > marked.previous ? marked.readSeq : null,
-        money: { price: resolved.price ?? null, maxOutputTokens: resolved.call.maxOutputTokens, reserveMicro: admission.reserveMicro ?? 0n },
+        money: { price: resolved.price ?? null, maxOutputTokens: resolved.call.maxOutputTokens, reserveMicro: admission.reserveMicro ?? 0n, roomCapTokens, growthTokens },
         wasMarked: state.marked,
       };
     });
@@ -801,21 +829,28 @@ export class DbAgentPort implements AgentPort {
         const reported = spent !== null && isCount(spent.inputTokens) && isCount(spent.outputTokens);
         const cost = costMicro(money.price, reported ? spent.inputTokens : estimated.inputChars, reported ? spent.outputTokens : estimated.outputChars);
         const held = BigInt(row.hold);
-        // The room kept for the last call on the free allowance stays kept (`RunMoney.reserveMicro`).
+        // The room kept for a last call on the free allowance (`RunMoney.reserveMicro`): this call is within it.
         const reserve = row.charge_to === "free" ? money.reserveMicro : 0n;
         // So far is at most what the reply held for its calls: each was held at its most before it was made, so a round
         // reported above that is the upstream's error — forgiven at settlement, never held for.
         const sofar = cost < held - reserve ? cost : held - reserve;
         const next = costMicro(money.price, nextInputTokens, money.maxOutputTokens);
+        // Another round must keep room for a last call after it: renewed from the next call's input bound and what one
+        // round can add, at most the whole of a call (`roomGrowth`); short of it on the free allowance, the next call is
+        // the last.
+        const renewed =
+          reserve === 0n ? 0n : costMicro(money.price, Math.min(nextInputTokens + money.growthTokens, money.roomCapTokens), money.maxOutputTokens);
         const tools = sofar + next <= BigInt(config.tools.maxPoints) * MICRO_PER_POINT && !(await budgetReachedWith(t, lane, agent, sofar, config));
-        return raiseHold(
+        const answer = await raiseHold(
           t,
           config,
           { id: run.id, ownerId: run.ownerId, chargeTo: row.charge_to, holdMicro: held },
-          { ok: sofar + next + reserve, final: sofar + next },
+          { ok: sofar + next + renewed, final: sofar + next },
           tools,
           new Date(),
         );
+        if (answer === "ok") money.reserveMicro = renewed;
+        return answer;
       });
     } catch (err) {
       if (err instanceof RunNotRunning) return "stop";
@@ -942,10 +977,18 @@ export class DbAgentPort implements AgentPort {
     // A notice its follow-up appended (a chain budget or the others' daily budget spent): the group is told after the
     // run's end.
     this.tell(result.followed);
-    // What its settlement wrote to tell its owner about their money (metering/reminders.ts), now committed.
+    // A reminder about money its settlement found due (metering/reminders.ts): its whisper made now, after commit, with
+    // the whisper's own locks; should this fail, the periodic sweep makes it.
     if (result.reminder !== null) {
-      this.deps.log.info({ metric: result.reminder.metric }, "a reminder about money was written for its owner");
-      this.deps.realtime.pushWhisper(result.reminder.whisper.ownerId, toWireWhisper(result.reminder.whisper));
+      try {
+        const reminded = await deliverReminder(this.deps.db, this.deps.config, result.reminder);
+        if (reminded) {
+          this.deps.log.info({ metric: reminded.metric }, "a reminder about money was made for its owner");
+          this.deps.realtime.pushWhisper(reminded.whisper.ownerId, toWireWhisper(reminded.whisper));
+        }
+      } catch (err) {
+        this.deps.log.error({ err, runId: run.id }, "agent run: its owner's reminder about money could not be made now; the periodic sweep makes it");
+      }
     }
   }
 
@@ -973,9 +1016,10 @@ export class DbAgentPort implements AgentPort {
       const final = recorded(end, { posted: posted.rowCount !== 0, interrupted: state.rows[0].interrupted, agent, removed });
       const ours = final.status === "failed" && final.error === "busy";
       const settled = await settle(t, config, run.id, usage, fallback, final.status, now, { forgiveAll: ours, log: this.deps.log });
-      // In the same transaction, under the account lock settlement took: the reminder about money it calls for, if any —
-      // in the Agent's own conversation, or, its Agent deleted, in the conversation of the Agent its owner used last.
-      const reminder = await remindInSettlement(t, config, run.ownerId, settled, now, agent.deleted ? null : { agentId: agent.id, conversationId: agent.conversationId }, this.deps.log);
+      // In the same transaction, under the account lock settlement took: the reminder about money it calls for, if any,
+      // recorded (its whisper is made after commit, `finish`) — for the Agent's own conversation, or, its Agent deleted,
+      // the conversation of the Agent its owner used last.
+      const reminder = await remindInSettlement(t, config, run.ownerId, settled, now, agent.deleted ? null : agent.id);
       const error = final.status === "failed" || final.status === "cancelled" ? (final.error ?? null) : null;
       const resetsAt = final.status === "failed" && final.resetsAt !== undefined ? final.resetsAt : null;
       const updated = await t.query<RunRow>(
@@ -1037,8 +1081,8 @@ interface Recorded {
   interrupted: boolean;
   /** The seq of the reply the run posted, to push again to its owner now that it is charged; null when none. */
   reply: number | null;
-  /** The reminder about money its settlement wrote (metering/reminders.ts), to push and count once committed; null when none. */
-  reminder: Reminded | null;
+  /** The reminder about money its settlement recorded (metering/reminders.ts), its whisper to make once committed; null when none. */
+  reminder: string | null;
 }
 
 /**

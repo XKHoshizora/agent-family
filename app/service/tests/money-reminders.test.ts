@@ -73,6 +73,11 @@ const whispersIn = async (who: Actor, conv: string): Promise<string[]> => {
     .reverse();
 };
 const metrics = () => lines.map((l) => JSON.parse(l) as Record<string, unknown>).filter((e) => typeof e.metric === "string" && /^(allowance_|balance_)/.test(e.metric as string));
+/** The log lines that tell of a deadlock (40P01) Postgres broke since `lines` was last emptied. */
+const deadlocks = () => lines.filter((l) => l.includes("40P01") || l.includes("deadlock detected"));
+/** How many statements of this database wait for a row lock now. */
+const lockWaits = async () =>
+  (await db.query<{ n: number }>("select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'")).rows[0]!.n;
 const freeUsed = async (ownerId: string) =>
   (await db.query<{ used: string }>("select coalesce(sum(used_micro), 0)::text as used from free_usage where owner_id = $1", [ownerId])).rows[0]!.used;
 /** Someone else's spending (a persona draft, say): today's free allowance used, set to `micro`. */
@@ -225,7 +230,7 @@ describe("reminders of the day's free allowance and of the balance", () => {
     expect(gateway.pending()).toBe(0);
   });
 
-  it("a persona draft that takes the allowance past 80 % tells its owner too: in the conversation of the Agent they used last, in the same transaction as the draft's settlement", async () => {
+  it("a persona draft that takes the allowance past 80 % tells its owner too: in the conversation of the Agent they used last, recorded with the draft's settlement and made once it has committed", async () => {
     const owner = await signUp(app, "draftwarn");
     const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
     const bob = await mustCreateAgent(app, owner, { model: FREE, name: "Bob", persona: "简短地回答。" });
@@ -265,5 +270,86 @@ describe("reminders of the day's free allowance and of the balance", () => {
     expect(await whispersIn(owner, bob.conversationId)).toEqual([WARN]);
     expect(await whispersIn(owner, cai.conversationId)).toEqual([]);
     expect(gateway.pending()).toBe(0);
+  });
+
+  it("lock order: a group reply's reminder is made in its Agent's own conversation after the settlement commits — a transaction that holds that conversation and then asks for the Agent's row (a message to the Agent, another of its runs) never deadlocks with it", async () => {
+    const gateway = scriptedGateway();
+    const call = gateway.hang();
+    const worker = workerWith(gateway);
+    const owner = await signUp(app, "cycleone");
+    const [mia, ned] = [await signUp(app, "cyclemia"), await signUp(app, "cyclened")];
+    const agent = await mustCreateAgent(app, owner, { model: FREE, handle: "cycle_a", name: "Cycle", persona: "简短地回答。" });
+    const g = await group(app, owner, "team", [mia, ned]);
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: agent.id })).status).toBe(201);
+    await setFreeUsed(owner.id, (23n * POINT) / 10n);
+    await say(mia, g, "@cycle_a 你好");
+    lines.length = 0;
+    const running = worker.runOnce();
+    await call.reached;
+    const other = await db.pool.connect();
+    try {
+      await other.query("begin");
+      await other.query("select 1 from conversations where id = $1 for update", [agent.conversationId]);
+      call.release("好的。", { usage: out(200) });
+      // The reply's settlement, or its reminder after it, comes to wait for the conversation held here…
+      await vi.waitFor(async () => expect(await lockWaits()).toBeGreaterThanOrEqual(1), { timeout: 5_000 });
+      // …which now asks for the Agent's row.
+      await other.query("select 1 from agents where principal_id = $1 for update", [agent.id]);
+      await other.query("commit");
+    } finally {
+      await other.query("rollback").catch(() => {});
+      other.release();
+    }
+    await running;
+    expect(deadlocks()).toEqual([]);
+    expect((await db.query("select status from agent_runs where conversation_id = $1 and agent_id = $2", [g, agent.id])).rows).toEqual([{ status: "done" }]);
+    await vi.waitFor(async () => expect(await whispersIn(owner, agent.conversationId)).toEqual([WARN]), { timeout: 5_000 });
+    expect(gateway.pending()).toBe(0);
+  });
+
+  it("lock order: a persona draft's reminder is made in the conversation of the Agent used last after the draft's settlement commits — a run of that Agent that holds its conversation and its row and then asks for the owner's account never deadlocks with it", async () => {
+    const owner = await signUp(app, "cycletwo");
+    const bob = await mustCreateAgent(app, owner, { model: FREE, name: "Bob", persona: "简短地回答。" });
+    await say(owner, bob.conversationId, "晚");
+    await setFreeUsed(owner.id, (23n * POINT) / 10n);
+    const draftCall = drafts.hang();
+    lines.length = 0;
+    const posting = api(app, owner, "POST", "/api/agents/draft-persona", { name: "Cai", model: FREE });
+    await draftCall.reached;
+    const other = await db.pool.connect();
+    try {
+      // As a run of Bob in `begin`'s third step, `extend` or its `finish` holds them.
+      await other.query("begin");
+      await other.query("select 1 from conversations where id = $1 for update", [bob.conversationId]);
+      await other.query("select 1 from agents where principal_id = $1 for update", [bob.id]);
+      draftCall.release("你是一个助手。", { usage: out(200) });
+      await vi.waitFor(async () => expect(await lockWaits()).toBeGreaterThanOrEqual(1), { timeout: 5_000 });
+      await other.query("select 1 from accounts where principal_id = $1 for update", [owner.id]);
+      await other.query("commit");
+    } finally {
+      await other.query("rollback").catch(() => {});
+      other.release();
+    }
+    const posted = await posting;
+    expect(deadlocks()).toEqual([]);
+    expect(posted.status).toBe(200);
+    await vi.waitFor(async () => expect(await whispersIn(owner, bob.conversationId)).toEqual([WARN]), { timeout: 5_000 });
+    expect(drafts.pending()).toBe(0);
+  });
+
+  it("a reminder whose whisper was never made — the service stopped between the settlement and the whisper — is made by the periodic sweep, once, also when two sweeps run at once", async () => {
+    const owner = await signUp(app, "sweepwarn");
+    const ann = await mustCreateAgent(app, owner, { model: FREE, name: "Ann", persona: "简短地回答。" });
+    // What the settlement wrote before the stop: the reminder is due, its whisper not made.
+    await db.query("insert into allowance_reminders (owner_id, day, threshold, agent_id) values ($1, (now() at time zone 'Asia/Shanghai')::date, 'warn', $2)", [owner.id, ann.id]);
+    const { deliverReminders } = await import("../src/metering/reminders.ts");
+    const made = await Promise.all([deliverReminders(db, app.deps.config, app.log), deliverReminders(db, app.deps.config, app.log)]);
+    expect(made.flat()).toHaveLength(1);
+    expect(await whispersIn(owner, ann.conversationId)).toEqual([WARN]);
+    expect(await deliverReminders(db, app.deps.config, app.log)).toEqual([]);
+    expect(await whispersIn(owner, ann.conversationId)).toEqual([WARN]);
+    const [row] = (await db.query("select whisper_id, delivered_at from allowance_reminders where owner_id = $1", [owner.id])).rows;
+    expect(row.whisper_id).not.toBeNull();
+    expect(row.delivered_at).not.toBeNull();
   });
 });

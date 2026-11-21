@@ -45,7 +45,8 @@ import { maxCostMicro } from "./prices.ts";
 export class HeldBack extends Error {
   constructor(
     readonly behind: readonly string[],
-    readonly on: "free" | "balance",
+    /** The source it waits on; `any` when the holds left neither source it may use anything (a free-tier reply). */
+    readonly on: "free" | "balance" | "any",
   ) {
     super("admission: the holds of the owner's other running calls leave no room for this one now");
     this.name = "HeldBack";
@@ -192,10 +193,11 @@ export async function admit(
   }
   // Never empty here: holds leave a source with something left nothing only when calls running hold against it.
   if (rows.length === 0) throw new Error("admission: held back behind no running call");
-  // A reply's source is the allowance or the balance, never the memory allowance (that is a memory call's alone).
+  // It waits on the source it would take; with none left after the holds, on every source it may use (`any`, a free-tier
+  // reply: the allowance and the balance). Never the memory allowance (a memory call's alone).
   throw new HeldBack(
     rows.map((r) => r.id),
-    (chargeTo ?? anything) === "free" ? "free" : "balance",
+    chargeTo === "free" ? "free" : chargeTo === "balance" ? "balance" : tier === "free" ? "any" : "balance",
   );
 }
 

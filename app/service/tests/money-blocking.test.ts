@@ -14,6 +14,7 @@ import { ESTIMATE, grant, MAX_COST, METER_ENV, meteredAgent, paidReply, runningR
 import { scriptedGateway, type ScriptedGateway } from "./helpers/models.ts";
 import { providerBody } from "./helpers/providers.ts";
 import { closeAllSockets, connect } from "./helpers/ws.ts";
+import { holdTokens, TOOL_PREAMBLE_TOKENS } from "../src/metering/tokens.ts";
 
 /**
  * Money that does not block (Task H; README "Metering", Admission, Extension, The debt bound): a reply starts while
@@ -42,9 +43,11 @@ const HOLD5 = {
   pdf: false,
   reasoning: [],
 };
+/** The acceptance's large-context free model (review of fix round 1, Part 2): 200 000 tokens, 4 096 out, 70 / 350 µ a token. */
+const LUNA = { ...HOLD5, id: "luna", label: "Luna", tier: "free", model: "luna-1", inputMicroPerToken: 70, outputMicroPerToken: 350, maxOutputTokens: 4096, contextTokens: 200000 };
 const ENV = {
   ...METER_ENV,
-  SITE_MODELS: JSON.stringify([...JSON.parse(METER_ENV.SITE_MODELS), HOLD5]),
+  SITE_MODELS: JSON.stringify([...JSON.parse(METER_ENV.SITE_MODELS), HOLD5, LUNA]),
   AGENT_MAX_CONCURRENT_RUNS: "8",
   AGENT_MAX_CONCURRENT_OTHERS_RUNS: "8",
 };
@@ -635,25 +638,32 @@ describe("fix round 1: spend clamped to what was held, a requeued attempt that c
     }
   });
 
-  it("a stop asked while the reply was running, landing after it was held back: the reply is stopped all the same, not left to run later", async () => {
+  it("a stop asked while the reply was running, landing after it was held back and claimed again: its next attempt ends stopped, also on a port that never saw the stop — the stop is kept in its row", async () => {
     const owner = await signUp(app, "stopwindow");
     const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
     await grant(db, owner.id, 6n * POINT);
     await say(owner, a.conv, "你好");
     await say(owner, b.conv, "你好");
     const { port } = workerWith(scriptedGateway());
+    const { port: two } = workerWith(scriptedGateway());
     const ann = (await port.claimNext())!;
     expect(isRunEnd(await port.begin(ann))).toBe(false);
     const bob = (await port.claimNext())!;
-    // The stop route's transaction sees it running…
-    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
-    // …its admission holds it back before the route has told the port…
+    // Its admission holds it back…
     await port.finish(bob, (await port.begin(bob)) as RunEnd, null, NOTHING);
     expect(await runIn(b.conv)).toMatchObject({ status: "queued" });
-    // …and what the route does next stops it.
-    await port.stopAsked(bob.id);
-    expect(await runIn(b.conv)).toMatchObject({ status: "stopped", hold: "0" });
     await port.finish(ann, { status: "failed", error: "busy" }, null, NOTHING);
+    // …it is claimed again, here by another port…
+    const again = (await two.claimNext())!;
+    expect(again.id).toBe(bob.id);
+    // …the stop's transaction sees it running, and the route tells a port that is not working on it…
+    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
+    await port.stopAsked(bob.id);
+    expect(await runIn(b.conv)).toMatchObject({ status: "running" });
+    // …and the attempt ends stopped all the same: never admitted, never left to run later.
+    expect(await two.begin(again)).toEqual({ status: "stopped" });
+    await two.finish(again, { status: "stopped" }, null, NOTHING);
+    expect(await runIn(b.conv)).toMatchObject({ status: "stopped", hold: "0", charge_to: null });
     expect(await port.claimNext()).toBeNull();
   });
 
@@ -813,5 +823,178 @@ describe("fix round 1: spend clamped to what was held, a requeued attempt that c
     await expect(
       db.tx((t) => raiseHold(t, app.deps.config, { id: "00000000-0000-0000-0000-000000000000", ownerId: owner.id, chargeTo: "memory", holdMicro: 1n }, { ok: 2n, final: 2n }, true, new Date())),
     ).rejects.toThrow(/memory/);
+  });
+});
+
+describe("fix round 2: the free allowance's room for the last call, renewed a round at a time; a stop kept in the row; the queue's marks", () => {
+  const FINAL_LINE = "你已经不能再查了，请用上面查到的内容直接回答。";
+  const withLine = (system: string) => (system.endsWith(`\n\n${FINAL_LINE}`) ? system : `${system}\n\n${FINAL_LINE}`);
+  const textsOf = (call: Pick<ModelCall, "messages">) => call.messages.flatMap((m) => m.parts.flatMap((p) => (p.type === "text" ? [p.text] : [])));
+  /** What the call after `call`'s rounds can take as input, as the worker bounds it (tool-loop-money.test.ts `nextInput`). */
+  const nextInput = (call: ModelCall, context: number, maxOut: number) =>
+    holdTokens([withLine(call.system), ...textsOf(call), JSON.stringify(call.tools), JSON.stringify(call.steps ?? [])], context, maxOut) + TOOL_PREAMBLE_TOKENS;
+  /** A toolbox offering search, at most 6 calls a reply, whose every call waits on `gate` and returns `output`. */
+  const searching = (output: unknown, gate: () => Promise<void> = async () => {}): Toolbox => ({
+    offer: () => ({ tools: [SEARCH], perTool: { search: 6 }, kinds: { search: "search" } }),
+    run: async (): Promise<ToolOutcome> => {
+      await gate();
+      return { output, activity: "search" };
+    },
+  });
+  /**
+   * The room a reply offered tools keeps on the free allowance for its last call (README "Metering", The free allowance's
+   * room): the cost of a call on `input` — the next call's input bound — and what one more round can add (`k` results of
+   * at most 3 × `resultMaxWeight` bytes each and 200 of framing, an assistant turn and notes of 6 bytes an output token,
+   * and 300), never more than the whole context and what providers add around tool definitions, with the whole output.
+   */
+  const room = (input: number, k: number, model: { context: number; out: number; inPrice: bigint; outPrice: bigint }) => {
+    const growth = k * (3 * app.deps.config.tools.resultMaxWeight + 200) + 6 * model.out + 300;
+    const capped = Math.min(input + growth, model.context - model.out + TOOL_PREAMBLE_TOKENS);
+    return BigInt(capped) * model.inPrice + BigInt(model.out) * model.outPrice;
+  };
+  const METER = { context: 100_000, out: 1000, inPrice: 100n, outPrice: 1000n };
+  const cost = (u: { inputTokens: number; outputTokens: number }) => BigInt(u.inputTokens) * 100n + BigInt(u.outputTokens) * 1000n;
+  /** A day's free allowance of `points` (the meter models' 3 otherwise). */
+  const withFree = (points: number): Config => ({ ...app.deps.config, freeDailyMicro: BigInt(points) * POINT });
+  const setFreeUsed = (ownerId: string, micro: bigint) =>
+    db.query(
+      `insert into free_usage (owner_id, day, used_micro) values ($1, (now() at time zone 'Asia/Shanghai')::date, $2)
+       on conflict (owner_id, day) do update set used_micro = $2`,
+      [ownerId, micro.toString()],
+    );
+
+  it("the room is renewed a round at a time: at admission and after each round the hold is what the reply has spent, the most of its next call, and the room for a last call after one more round", async () => {
+    const holds: bigint[] = [];
+    const gateway = scriptedGateway()
+      .callTools([{ name: "search", input: { query: "a" } }], { usage: U(1000, 50) })
+      .callTools([{ name: "search", input: { query: "b" } }], { usage: U(1500, 60) });
+    const last = gateway.hang();
+    const box = searching({ hits: ["川菜馆"] }, async () => {
+      holds.push(BigInt((await runIn(conv)).hold));
+    });
+    const { worker } = workerWith(gateway, { box, config: withFree(100) });
+    const owner = await signUp(app, "rollroom");
+    const conv = (await agentOf(owner, FREE, "Rolf")).conv;
+    await setFreeUsed(owner.id, 50n * POINT);
+    await say(owner, conv, "附近有什么好吃的？");
+    const running = worker.runOnce();
+    const third = await last.reached;
+    const [c1, c2] = gateway.calls as [ModelCall, ModelCall];
+    const first = holdTokens([c1.system, ...textsOf(c1), JSON.stringify(c1.tools)], METER.context, METER.out) + TOOL_PREAMBLE_TOKENS;
+    const callMax = (input: number) => BigInt(input) * 100n + 1000n * 1000n;
+    // At admission (seen by round 1's tool): the first call's most and the room after one round.
+    expect(holds[0]).toBe(callMax(first) + room(first, 6, METER));
+    // After round 1 (seen by round 2's tool): spent, the second call's most, the room after one more round.
+    expect(holds[1]).toBe(cost(U(1000, 50)) + callMax(nextInput(c2, METER.context, METER.out)) + room(nextInput(c2, METER.context, METER.out), 6, METER));
+    // After round 2, before the third call.
+    expect(await runIn(conv).then((r) => BigInt(r.hold))).toBe(
+      cost(U(2500, 110)) + callMax(nextInput(third, METER.context, METER.out)) + room(nextInput(third, METER.context, METER.out), 6, METER),
+    );
+    // Not the whole context any more: far below it.
+    expect(holds[0]).toBeLessThan(callMax(first) + room(1_000_000, 6, METER));
+    expect(third.toolChoice).toBeUndefined();
+    last.release("去吃川菜。", { usage: U(2000, 70) });
+    await running;
+    expect(await runIn(conv)).toMatchObject({ status: "done", hold: "0", charge_to: "free" });
+  });
+
+  it("the acceptance's free model at half of a 100-point day: four one-search replies all start at once, and each keeps its round (its next call is not made the last)", { timeout: 60_000 }, async () => {
+    const routes = new Map<string, ModelGateway>();
+    let arrived = 0;
+    let open!: () => void;
+    const all = new Promise<void>((resolve) => (open = resolve));
+    const gate = async () => {
+      if (++arrived === 4) open();
+      await Promise.race([all, sleep(10_000)]);
+    };
+    const { worker } = workerWith(router(routes), { box: searching({ hits: ["川菜馆"] }, gate), config: withFree(100) });
+    const owner = await signUp(app, "lunahalf");
+    const convs: string[] = [];
+    for (const name of ["L1", "L2", "L3", "L4"]) {
+      const agent = await mustCreateAgent(app, owner, { model: { source: "site", id: "luna" }, name, persona: `简短地回答。${name}` });
+      routes.set(name, scriptedGateway().callTools([{ name: "search", input: { query: name } }], { usage: U(2500, 300) }).reply("去吃川菜。", { usage: U(3000, 400) }));
+      convs.push(agent.conversationId as string);
+    }
+    await setFreeUsed(owner.id, 50n * POINT);
+    for (const conv of convs) await say(owner, conv, "附近有什么好吃的？");
+    await Promise.all(convs.map(() => worker.runOnce()));
+    expect(arrived).toBe(4);
+    for (const conv of convs) expect(await runIn(conv)).toMatchObject({ status: "done", held_back_by: null, charge_to: "free" });
+    for (const g of routes.values()) {
+      const calls = (g as ScriptedGateway).calls;
+      expect(calls).toHaveLength(2);
+      expect(calls[1]!.toolChoice).toBeUndefined();
+    }
+  });
+
+  it("a stop asked while the reply ran is kept in its row: an attempt that begins after it — the same, or the next after a hold-back — ends stopped, whatever the in-process flags say", async () => {
+    const owner = await signUp(app, "stoprow");
+    const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
+    await grant(db, owner.id, 6n * POINT);
+    await say(owner, a.conv, "你好");
+    await say(owner, b.conv, "你好");
+    const { port } = workerWith(scriptedGateway());
+    const ann = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(ann))).toBe(false);
+    const bob = (await port.claimNext())!;
+    // The stop's transaction sees it running; the route has not told the port yet.
+    expect(await db.tx((t) => stopRun(t, owner.id, b.conv, bob.id))).toEqual({ stopped: null, running: true });
+    expect(await port.begin(bob)).toEqual({ status: "stopped" });
+    await port.finish(bob, { status: "stopped" }, null, NOTHING);
+    expect(await runIn(b.conv)).toMatchObject({ status: "stopped", hold: "0", held_back_by: null });
+    await port.finish(ann, { status: "failed", error: "busy" }, null, NOTHING);
+    expect(await port.claimNext()).toBeNull();
+  });
+
+  it("a reply someone else called for, held back, does not keep its owner's own replies waiting while the others' lanes are full", async () => {
+    const owner = await signUp(app, "lanemark");
+    const [mia, ned] = [await signUp(app, "lanemia"), await signUp(app, "lanened")];
+    const x = await mustCreateAgent(app, owner, { model: FIVE, handle: "lane_x", name: "Xia", persona: "简短地回答。Xia" });
+    const y = await agentOf(owner, FIVE, "Yan");
+    const z = await agentOf(owner, PAID, "Zed");
+    const w = await agentOf(owner, PAID, "Wen");
+    await grant(db, owner.id, 6n * POINT);
+    const g = await group(app, owner, "team", [mia, ned]);
+    expect((await api(app, owner, "POST", `/api/conversations/${g}/members`, { principalId: x.id })).status).toBe(201);
+    const { port } = workerWith(scriptedGateway(), { config: { ...app.deps.config, agentMaxConcurrentOthersRuns: 1 } });
+    await say(owner, y.conv, "你好");
+    const yan = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(yan))).toBe(false);
+    await say(mia, g, "@lane_x 你好");
+    const others = (await port.claimNext())!;
+    await port.finish(others, (await port.begin(others)) as RunEnd, null, NOTHING);
+    expect(await runIn(g)).toMatchObject({ status: "queued", held_back_on: "balance" });
+    await port.finish(yan, { status: "failed", error: "busy" }, null, NOTHING);
+    // Another reply someone else called for runs (on no money): the others' one place is taken, so it cannot be claimed.
+    await db.query("insert into agent_runs (purpose, conversation_id, agent_id, owner_id, status, covers_seq, lane, started_at) values ('reply', $1, $2, $3, 'running', 0, 'others', now())", [
+      w.conv,
+      w.id,
+      owner.id,
+    ]);
+    await say(owner, z.conv, "你好");
+    const next = (await port.claimNext())!;
+    expect(next.conversationId).toBe(z.conv);
+  });
+
+  it("a free-tier reply held back with nothing left after the holds on either source waits on both: a younger reply the balance would pay waits behind it too", async () => {
+    const owner = await signUp(app, "bothsources");
+    const [a, b, c, d] = [await agentOf(owner, FREE, "Ann"), await agentOf(owner, PAID, "Bob"), await agentOf(owner, FREE, "Cy"), await agentOf(owner, PAID, "Dee")];
+    // Half a point left of the day's allowance, one point of balance: one running reply holds more than each.
+    await setFreeUsed(owner.id, (5n * POINT) / 2n);
+    await grant(db, owner.id, POINT);
+    const { port } = workerWith(scriptedGateway());
+    await say(owner, a.conv, "你好");
+    const ann = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(ann))).toBe(false);
+    await say(owner, b.conv, "你好");
+    const bob = (await port.claimNext())!;
+    expect(isRunEnd(await port.begin(bob))).toBe(false);
+    expect([(await runIn(a.conv)).charge_to, (await runIn(b.conv)).charge_to]).toEqual(["free", "balance"]);
+    await say(owner, c.conv, "你好");
+    const cy = (await port.claimNext())!;
+    await port.finish(cy, (await port.begin(cy)) as RunEnd, null, NOTHING);
+    expect(await runIn(c.conv)).toMatchObject({ status: "queued", held_back_on: "any" });
+    await say(owner, d.conv, "你好");
+    expect(await port.claimNext()).toBeNull();
   });
 });

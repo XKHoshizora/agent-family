@@ -459,9 +459,13 @@ describe("the money of a reply that offers tools", () => {
     const most = callMax(nextInput(call));
     expect(spent + ordinary).toBeLessThanOrEqual(leave);
     expect(spent + most).toBeGreaterThan(leave);
-    // Its admission held its first call and room for a whole-context last call (fix round 1): the last call fits in it.
-    const firstCall = callMax(holdTokens([windowGateway.calls[0]!.system, ...textsOf(windowGateway.calls[0]!), JSON.stringify(TOOLS)], CONTEXT, MAX_OUT) + TOOL_PREAMBLE_TOKENS);
-    const lastCallRoom = callMax(CONTEXT - MAX_OUT + TOOL_PREAMBLE_TOKENS);
+    // Its admission held its first call and room for a last call after one more round (README "Metering", The free
+    // allowance's room: the first call's input and what one round can bring back — 6 searches of at most 3 × 3 000 bytes
+    // and 200 of framing, 6 bytes an output token, 300 — at most the whole context): the last call fits in it.
+    const firstInput = holdTokens([windowGateway.calls[0]!.system, ...textsOf(windowGateway.calls[0]!), JSON.stringify(TOOLS)], CONTEXT, MAX_OUT) + TOOL_PREAMBLE_TOKENS;
+    const firstCall = callMax(firstInput);
+    const growth = 6 * (3 * app.deps.config.tools.resultMaxWeight + 200) + 6 * MAX_OUT + 300;
+    const lastCallRoom = callMax(Math.min(firstInput + growth, CONTEXT - MAX_OUT + TOOL_PREAMBLE_TOKENS));
     expect([...new Set(held)]).toEqual([firstCall + lastCallRoom]);
     expect(spent + most).toBeLessThanOrEqual(held[0]!);
     expect(await holdOf(run.id)).toBe(held[0]);
