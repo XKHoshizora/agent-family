@@ -268,6 +268,17 @@ describe("the owner learns of it", () => {
     expect("whispers" in (await api(app, w.owner, "GET", `/api/conversations/${w.g}`)).json).toBe(false);
   });
 
+  it("the count on the conversation entry keeps to the owner's current stay, as the lists do: an open whisper of an earlier stay is not counted (N-1)", async () => {
+    const w = await world();
+    await whisper(w);
+    expect((await api(app, w.owner, "GET", `/api/conversations/${w.g}`)).json.whispers).toBe(1);
+    // As if olive had left and come back with it still open (no path leaves one open today: the count must not depend on that).
+    await say(w.mia, w.g, "åŽæ¥çš„è¯");
+    await db.query("update memberships set joined_seq = (select seq from conversations where id = $1) where conversation_id = $1 and principal_id = $2", [w.g, w.owner.id]);
+    expect("whispers" in (await api(app, w.owner, "GET", `/api/conversations/${w.g}`)).json).toBe(false);
+    expect((await api(app, w.owner, "GET", `/api/conversations/${w.g}/whispers`)).json.whispers).toEqual([]);
+  });
+
   it("in /api/sync an answered whisper of a message older than the 30 it returns is left to the list route; an open one always comes", async () => {
     const w = await world();
     const old = await whisper(w);
@@ -495,6 +506,7 @@ describe("against the Agent's delete and its leaving (lock order: conversation â
   it("an answer waits for a delete's lock on the Agent's row before it takes the whisper's: with a hook that locks the Agent, no deadlock", async () => {
     const w = await world();
     const made = await whisper(w);
+    const realHook = ANSWER_HOOKS.found_elsewhere;
     ANSWER_HOOKS.found_elsewhere = LOCKS_THE_AGENT;
     try {
       // The delete: the Agent's conversation and row, then (once the accept waits) its whispers â€” whisper rows last â€” and commit.
@@ -510,12 +522,13 @@ describe("against the Agent's delete and its leaving (lock order: conversation â
       expect(await accepting).toEqual({ status: 404, json: { error: "not_found" } });
       expect(await statusOf(made.id)).toBe("expired");
     } finally {
-      delete ANSWER_HOOKS.found_elsewhere;
+      ANSWER_HOOKS.found_elsewhere = realHook;
     }
   });
 
   it("an accept and the Agent's delete at the same moment, 20 times: never an error, and one outcome each time", async () => {
     const w = await world();
+    const realHook = ANSWER_HOOKS.found_elsewhere;
     ANSWER_HOOKS.found_elsewhere = LOCKS_THE_AGENT;
     try {
       for (let i = 0; i < 20; i++) {
@@ -529,7 +542,7 @@ describe("against the Agent's delete and its leaving (lock order: conversation â
         else expect([i, accepted.status, status]).toEqual([i, 404, "expired"]);
       }
     } finally {
-      delete ANSWER_HOOKS.found_elsewhere;
+      ANSWER_HOOKS.found_elsewhere = realHook;
     }
   }, 60_000);
 
@@ -544,6 +557,7 @@ describe("against the Agent's delete and its leaving (lock order: conversation â
       const both = deferred();
       meet = { arrived: 0, both: both.promise, release: () => both.resolve() };
     };
+    const realHook = ANSWER_HOOKS.found_elsewhere;
     ANSWER_HOOKS.found_elsewhere = {
       accepted: async (t, x) => {
         if (++meet.arrived === 2) meet.release();
@@ -560,7 +574,7 @@ describe("against the Agent's delete and its leaving (lock order: conversation â
         expect([i, await statusOf(a.id), await statusOf(b.id)]).toEqual([i, "accepted", "accepted"]);
       }
     } finally {
-      delete ANSWER_HOOKS.found_elsewhere;
+      ANSWER_HOOKS.found_elsewhere = realHook;
     }
   }, 60_000);
 });

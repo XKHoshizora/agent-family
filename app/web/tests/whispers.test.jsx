@@ -242,6 +242,28 @@ describe("with older history", () => {
     expect(rows().slice(0, 2)).toEqual(["m1", "m2"]);
   });
 
+  it("refused once, and signed out (the layer stopped) meanwhile: it is not asked again", async () => {
+    const app = await openGroup({
+      messages: range(G1, 11, 40, [ANN, BO]),
+      whispers: [],
+      api: {
+        listMessages: vi.fn(async () => ({ messages: range(G1, 1, 10, [ANN, BO]), nextBefore: null })),
+        listWhispers: vi.fn(async () => {
+          throw apiError(429, "rate_limited");
+        }),
+      },
+    });
+    fireEvent.scroll(timeline());
+    await flush();
+    expect(app.api.listWhispers).toHaveBeenCalledTimes(1);
+    app.layer.stop();
+    await elapse(WHISPER_RETRY_MS);
+    await flush();
+    await elapse(10 * WHISPER_RETRY_MS);
+    await flush();
+    expect(app.api.listWhispers).toHaveBeenCalledTimes(1);
+  });
+
   it("a conversation where I have no Agent and no whisper asks the list route for nothing", async () => {
     const { api } = await openApp({
       sync: () => syncOf([group(G1, { lastSeq: 40, readSeq: 40 })], range(G1, 11, 40, [ANN, BO])),

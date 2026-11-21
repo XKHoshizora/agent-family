@@ -369,7 +369,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       try {
         const page = await api.listMessages(conversationId, { before, limit });
         // My whispers that follow these messages come with them (one update: nothing moves under the place kept).
-        const whispers = staleness(token) ? [] : await whispersBefore(conversationId, before, page.messages?.[0]?.seq ?? 0);
+        const whispers = staleness(token) ? [] : await whispersBefore(conversationId, before, page.messages?.[0]?.seq ?? 0, token);
         const why = staleness(token);
         if (why) return { ok: false, error: dropped(why) };
         if ((getModel().windows[conversationId]?.n ?? 0) !== (win?.n ?? 0)) return { ok: false, error: dropped("stale") };
@@ -408,7 +408,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
       try {
         // The service pages backwards only: the page below `newest + 1 + limit` holds the messages after `newest`.
         const page = await api.listMessages(conversationId, { before: newest + 1 + limit, limit });
-        const whispers = staleness(token) ? [] : await whispersBefore(conversationId, newest + 1 + limit, page.messages?.[0]?.seq ?? 0);
+        const whispers = staleness(token) ? [] : await whispersBefore(conversationId, newest + 1 + limit, page.messages?.[0]?.seq ?? 0, token);
         const why = staleness(token);
         if (why) return { ok: false, error: dropped(why) };
         if (getModel().windows[conversationId]?.n !== win.n) return { ok: false, error: dropped("stale") };
@@ -433,9 +433,10 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
    * down to `from` (the oldest seq of that page), newest first, a page of WHISPER_PAGE at a time (at most WHISPER_PAGES).
    * Only where I may have some (model.js `mayWhisper`: elsewhere the route is a 404 anyway). Never fails: a refusal or an
    * error is no more whispers (an open one comes with the next sync), but a page refused for going too fast (429) is asked
-   * for once more, WHISPER_RETRY_MS later.
+   * for once more, WHISPER_RETRY_MS later — unless the request it was for is stale by then (`token`: signed out, the layer
+   * stopped, or I left the conversation), when nothing more is asked.
    */
-  async function whispersBefore(conversationId, before, from) {
+  async function whispersBefore(conversationId, before, from, token) {
     if (!mayWhisper(getModel(), conversationId)) return [];
     const found = [];
     let next = before;
@@ -449,6 +450,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
         if (retried || errorOf(err).status !== 429) break;
         retried = true;
         await new Promise((resolve) => setTimeout(resolve, WHISPER_RETRY_MS));
+        if (staleness(token)) break;
         try {
           page = await ask(next);
         } catch {
@@ -466,7 +468,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     const held = getModel().whispers?.[conversationId]?.[whisperId];
     if (!held) return;
     const token = tokenFor(conversationId);
-    const found = await whispersBefore(conversationId, held.afterSeq + 1, held.afterSeq);
+    const found = await whispersBefore(conversationId, held.afterSeq + 1, held.afterSeq, token);
     if (!staleness(token)) setModel(applyWhispers(getModel(), found));
   }
 
@@ -500,7 +502,7 @@ export function createActions({ getModel, setModel, api = routes, uuid, now, epo
     try {
       const page = await api.listMessages(conversationId, { before: seq + JUMP_AFTER, limit: JUMP_WINDOW });
       const found = !staleness(token) && (page.messages ?? []).some((m) => m.seq === seq);
-      const whispers = found ? await whispersBefore(conversationId, seq + JUMP_AFTER, page.messages[0].seq) : [];
+      const whispers = found ? await whispersBefore(conversationId, seq + JUMP_AFTER, page.messages[0].seq, token) : [];
       const why = staleness(token);
       if (why) return { ok: false, error: dropped(why) };
       if (jumps.get(conversationId) !== n) return { ok: false, error: dropped("superseded") };

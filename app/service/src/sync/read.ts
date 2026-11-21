@@ -118,7 +118,8 @@ async function conversationEntries(t: Tx, me: string, onlyId: string | null = nu
               where m.conversation_id = c.id and m.seq > me.read_seq and m.kind <> 'system' and m.sender_id <> $1 and ${notAcknowledgement("m")}) as unread,
             -- The caller's own open whispers there that wait for an answer (offer a button), and nobody else's (owner_id is the reader).
             (select count(*) from whispers w
-              where w.owner_id = $1 and w.conversation_id = c.id and w.status = 'open' and jsonb_array_length(w.body -> 'actions') > 0) as whispers
+              where w.owner_id = $1 and w.conversation_id = c.id and w.status = 'open' and jsonb_array_length(w.body -> 'actions') > 0
+                and w.after_seq >= me.joined_seq) as whispers
        from memberships me
        join conversations c on c.id = me.conversation_id
        left join lateral (

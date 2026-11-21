@@ -226,11 +226,22 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
    * `run` ends the open whisper `made` (its owner's socket gets it expired) while the fellow members' `sockets` are open: they get what
    * `seen` waits for (the leaving), and nothing of the whisper — no frame of it, no key, its text or its id.
    */
-  async function endsUnseen(sockets: TestSocket[], ownerSocket: TestSocket, made: Whisper, run: () => Promise<void>, seen: (e: any) => boolean) {
+  async function endsUnseen(
+    sockets: TestSocket[],
+    ownerSocket: TestSocket,
+    made: Whisper,
+    run: () => Promise<void>,
+    seen: (e: any) => boolean,
+    settle: { who: Actor; conversationId: string },
+  ) {
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === made.id);
     await run();
     await ownerSocket.waitFor((e) => e.type === "whisper" && e.whisper.id === made.id && e.whisper.status === "expired");
     for (const socket of sockets) await socket.waitFor(seen);
+    // A frame known to come after everything the run pushed (each socket's pushes keep their order): a message, sent now,
+    // then read — so a whisper frame sent to them after their leaving frame would be there too.
+    const last = await say(settle.who, settle.conversationId, "收尾");
+    for (const socket of sockets) await socket.waitFor((e) => e.type === "message" && e.message.conversationId === settle.conversationId && e.message.seq === last);
     const frames: Array<[string, unknown]> = sockets.flatMap((s, i) => s.events.map((e, j): [string, unknown] => [`socket ${i} frame ${j}`, e]));
     nothingOf(frames, [made.id]);
     for (const [label, frame] of frames) expect([label, (frame as { type: string }).type]).not.toEqual([label, "whisper"]);
@@ -246,6 +257,7 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
       made,
       async () => expect((await api(app, w.owner, "DELETE", `/api/conversations/${w.g}/members/${w.owner.id}`)).status).toBe(200),
       (e) => e.type === "message" && e.message.system?.event === "member_left" && e.message.system?.principalId === w.owner.id,
+      { who: w.mia, conversationId: w.g },
     );
   });
 
@@ -261,6 +273,7 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
       made,
       async () => expect((await api(app, w.mia, "DELETE", `/api/conversations/${hers}/members/${w.owner.id}`)).status).toBe(200),
       (e) => e.type === "message" && e.message.system?.event === "member_removed",
+      { who: w.mia, conversationId: hers },
     );
   });
 
@@ -274,6 +287,7 @@ describe("a whisper's whole life, as everyone but its owner sees it", () => {
       made,
       async () => expect((await api(app, w.owner, "DELETE", `/api/agents/${w.agent.id}`)).status).toBe(200),
       (e) => e.type === "message" && e.message.system?.event === "member_left" && e.message.system?.principalId === w.agent.id,
+      { who: w.mia, conversationId: w.g },
     );
   });
 
@@ -301,13 +315,48 @@ describe("who reads the whispers table (a static check)", () => {
    * Every statement in `source` that names the `whispers` table: read, written or joined. Model context, memory, search, the judge —
    * anything that could put a whisper in front of someone else — must go through src/whispers/ (owner_id = the reader) to reach one.
    */
-  const tableRefs = (source: string): string[] => [...source.matchAll(/\b(?:from|join|into|update|table|references)\s+(?:only\s+)?"?whispers"?(?![\w-])/gi)].map((m) => m[0]);
+  const TABLE = String.raw`(?:"?[a-z_][\w]*"?\.)?"?whispers"?(?![\w-])`;
+  const NAMING = new RegExp(
+    [
+      String.raw`\b(?:from|join|into|update|table|references|using)\s+(?:only\s+)?${TABLE}`,
+      // A comma join: `from a, whispers w where …` (an alias, then what SQL says next).
+      String.raw`,\s*${TABLE}(?:\s+(?:as\s+)?\w+)?\s+(?:where|join|left|right|inner|full|cross|on|order|group|limit)\b`,
+      String.raw`\b(?:copy|truncate)\s+(?:table\s+)?${TABLE}`,
+    ].join("|"),
+    "gi",
+  );
+  const tableRefs = (source: string): string[] => [...source.matchAll(NAMING)].map((m) => m[0]);
 
   it("the check finds every way of naming the table, and not the word in prose or other names", () => {
-    for (const sql of ["select 1 from whispers w", "SELECT * FROM  whispers", "left join whispers on", 'insert into "whispers" (id)', "update whispers set", "delete from whispers where", "alter table whispers add"]) {
+    for (const sql of [
+      "select 1 from whispers w",
+      "SELECT * FROM  whispers",
+      "left join whispers on",
+      'insert into "whispers" (id)',
+      "update whispers set",
+      "delete from whispers where",
+      "alter table whispers add",
+      "select 1 from conversations c, whispers w where w.id = c.id",
+      "delete from agents a using whispers w where",
+      "select * from public.whispers",
+      'select * from "public"."whispers"',
+      "truncate whispers",
+      "truncate table whispers",
+      "copy whispers to stdout",
+    ]) {
       expect([sql, tableRefs(sql).length]).toEqual([sql, 1]);
     }
-    for (const prose of ["// whispers from the owner", 'import { whispersFrom } from "../whispers/store.ts"', "the whispers of whoever left", "from whispers_backup", "whispersFrom(t, me, from)"]) {
+    for (const prose of [
+      "// whispers from the owner",
+      'import { whispersFrom } from "../whispers/store.ts"',
+      "the whispers of whoever left",
+      "from whispers_backup",
+      "whispersFrom(t, me, from)",
+      "pushWhispers(app.realtime, whispers);",
+      "const { whispers, nextBefore } = page;",
+      "[...messages, whispers]",
+      "copy whispers_old",
+    ]) {
       expect([prose, tableRefs(prose)]).toEqual([prose, []]);
     }
   });
