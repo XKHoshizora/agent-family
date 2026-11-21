@@ -18,7 +18,19 @@ export const chatPane = (page, title) => page.getByRole("region", { name: title,
 export const messageList = (chat) => chat.getByTestId("message-list");
 
 /** The messages of an open conversation whose text contains `text`. */
-export const messagesWith = (chat, text) => messageList(chat).getByRole("listitem").filter({ hasText: text });
+export const messagesWith = (chat, text) => messageList(chat).getByRole("listitem").filter({ hasText: withTags(text) });
+
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+/**
+ * `text` as it reads in a message whose mentions are drawn as tags: a tag's hidden words (「提到 名字」, read by screen
+ * readers) come right before its `@handle`, so a text with words just before an `@handle` is matched with them allowed there.
+ * A text without `@` is matched as it is.
+ */
+export function withTags(text) {
+  if (typeof text !== "string" || !text.includes("@")) return text;
+  const parts = text.split(/(@[A-Za-z0-9_.]+)/);
+  return new RegExp(parts.map((part, i) => (i % 2 === 1 ? `(?:提到 [^@]*?)?${escapeRegExp(part)}` : escapeRegExp(part))).join(""));
+}
 
 export const composer = (chat) => chat.getByRole("textbox", { name: "消息内容" });
 
@@ -205,7 +217,7 @@ export const streamingBubble = (chat) => messageList(chat).locator("li.streaming
 export const runStatusLine = (chat) => messageList(chat).locator("li.run-status");
 
 /** The messages from the Agent (the stored ones) whose text contains `text`. */
-export const agentMessagesWith = (chat, text) => messageList(chat).locator("li.msg.theirs:not(.streaming)").filter({ hasText: text });
+export const agentMessagesWith = (chat, text) => messageList(chat).locator("li.msg.theirs:not(.streaming)").filter({ hasText: withTags(text) });
 
 /** The open Agent conversation's 会话资料 → 开始新话题 → confirm; the panel is closed again. */
 export async function newTopicUi(page, chat) {
