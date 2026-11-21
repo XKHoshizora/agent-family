@@ -5,7 +5,7 @@ import { cutToWeight, lastToWeight, weight } from "../../metering/tokens.ts";
 import type { ToolSpec } from "../../models/gateway.ts";
 import { askerLine, callsSeen } from "../context.ts";
 import type { ToolOutcome } from "../runtime/port.ts";
-import { cleanText, labelName, NO_GROUP_TITLE, oneLine, TOOL_MATERIAL, withoutMark } from "../runtime/prompt.ts";
+import { cleanText, labelName, NO_GROUP_TITLE, oneLine, speakerRole, TOOL_MATERIAL, withoutMark } from "../runtime/prompt.ts";
 import { siteDateTime, siteWeekday } from "./clock.ts";
 import type { ElsewhereAsk, RunScope, ToolDeps } from "./index.ts";
 import { withoutCitations } from "./refs.ts";
@@ -226,7 +226,8 @@ function fit(found: Found, deps: ToolDeps, scope: RunScope, term: string): { res
   const clean = (s: string): string => withoutCitations(withoutMark(s, scope.group ? scope.mark : null));
   const drafts = found.rows.slice(0, SEARCH_RESULTS_MAX).map((row) => {
     const seq = Number(row.seq);
-    const role = row.sender_id === scope.agentId ? null : row.sender_kind === "agent" ? "Agent" : row.sender_id === scope.ownerId ? "你的主人" : "群成员";
+    // Who they are to the Agent by account, as a group's labels say it (`speakerRole`); the Agent itself is `你自己`.
+    const role = row.sender_id === scope.agentId ? null : speakerRole(row.sender_id, row.sender_kind, scope.ownerId);
     const { date, time } = siteDateTime(row.created_at, deps.config.siteTimezone);
     const elsewhere = !scope.group && row.conversation_id !== scope.conversationId;
     const file = row.attachment && !(scope.group && seq <= found.line) ? { id: row.attachment.id, name: clean(row.attachment.name) } : null;
