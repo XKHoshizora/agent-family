@@ -282,10 +282,14 @@ describe("the holds of one owner's replies are capped together by queueing, not 
     const [a, b] = [await agentOf(owner, FIVE, "Ann"), await agentOf(owner, FIVE, "Bob")];
     await grant(db, owner.id, 6n * POINT);
     await say(owner, a.conv, "你好");
-    await say(owner, b.conv, "你好");
     worker.start();
     try {
+      // Ann's reply admitted and at its call before Bob's is sent: two replies claimed in one go are admitted in whichever
+      // order their transactions reach the owner's account (nothing promises the older one first; the mark orders them
+      // only once one was held back), so the order this test is about is made, not hoped for.
       await first.reached;
+      await say(owner, b.conv, "你好");
+      worker.wake();
       await vi.waitFor(async () => expect(await runIn(b.conv)).toMatchObject({ status: "queued", held_back_by: [(await runIn(a.conv)).id] }), { timeout: 5_000 });
       first.release("一。", { usage: U(0, 1000) });
       await vi.waitFor(async () => expect(await runIn(b.conv)).toMatchObject({ status: "done" }), { timeout: 5_000 });

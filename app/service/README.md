@@ -2882,7 +2882,11 @@ reply with a large hold is not passed for ever by smaller ones; which source a q
 admission's own rule on what its owner has now; a free-tier reply held back with nothing left of either source after the
 holds waits on both, `held_back_on` `any`, and holds back the younger replies either would pay); a reply on the owner's own
 provider key, or one the other source would pay, never waits behind it, nor does the owner's own reply (lane `own`)
-behind a reply someone else called for, which the others' lanes may keep queued. Claimed again, its owner is told it is running (the other members of a group, who were told it
+behind a reply someone else called for, which the others' lanes may keep queued. What first come, first served promises,
+exactly: among one payer's replies paid from one source, a reply once held back is admitted before any younger one; two
+replies that reach admission together — claimed in one go, their first steps run side by side — are admitted in whichever
+order their transactions take the owner's account lock, the younger possibly first (the other is then held back, and marked).
+Claimed again, its owner is told it is running (the other members of a group, who were told it
 is replying, are told nothing more), and its wait is not logged again; each claim starts the run's in-process flags
 afresh, and nothing of an attempt that was held back (its end, its flags) touches the next. The worker is woken after a
 trigger commits, after every run it has worked on ends (so a held-back reply is claimed as the reply it waited for
